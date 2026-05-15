@@ -1,0 +1,188 @@
+"""FastAPI application entrypoint (Phase 1.A7 + 1.D / C1-10).
+
+Lifespan order (per plan §700-704 + AC25):
+  1. Create DB engine (sqlalchemy async)
+  2. Create S3 client (aioboto3) on app.state.s3
+  3. Initialize RunnerRegistry (dev-2 stub on day 1, real in Phase 2.D)
+  4. Run boot-time orphan-container sweep (dev-2 sweeper, exposed via
+     src/runner_mgmt)
+  5. Run boot-time DB orphan-message scan (AC24 -> 'stream_orphaned')
+
+Routers stubbed: not all routes are wired yet — dev-2 owns
+src/api/stream.py and contributes runner_registry / warm-idle / heartbeat
+managers to lifespan via a bundled change-request.
+"""
+from __future__ import annotations
+
+import logging
+from contextlib import AsyncExitStack, asynccontextmanager
+from typing import AsyncIterator
+
+import aioboto3
+from botocore.config import Config
+from fastapi import FastAPI
+
+from src.api import artifacts, health, internal, sessions, stop, stream, webhooks
+from src.db.engine import create_engine_for_settings, get_sessionmaker
+from src.hooks_audit.emit import make_audit_emit_closure
+from src.runner_mgmt import RunnerRegistry
+from src.settings import get_settings
+from src.streaming.event_bus import event_bus
+
+
+# Force the `kloc_agent` logger tree to INFO so B-DIAG-* observability
+# lines from `src/api/internal.py` + `src/api/webhooks.py` actually
+# reach uvicorn's stdout — uvicorn keeps the root logger at WARNING by
+# default and our custom logger inherits that level otherwise.
+logging.getLogger("kloc_agent").setLevel(logging.INFO)
+logger = logging.getLogger("kloc_agent")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    stack = AsyncExitStack()
+
+    # 1. DB engine
+    engine = create_engine_for_settings(settings)
+    app.state.engine = engine
+
+    # 2. S3 client (lifespan-managed; research/04 §6.4)
+    session = aioboto3.Session(
+        aws_access_key_id=settings.minio_access_key,
+        aws_secret_access_key=settings.minio_secret_key,
+        region_name="us-east-1",
+    )
+    s3 = await stack.enter_async_context(
+        session.client(
+            "s3",
+            endpoint_url=settings.minio_endpoint_url,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            ),
+            use_ssl=settings.minio_use_ssl,
+        )
+    )
+    app.state.s3 = s3
+
+    # 3. RunnerRegistry. Wire the real DockerRunner before the sweeper
+    #    runs so the registry's `known_runner_ids()` (empty at boot) is
+    #    available. DockerRunner import is lazy so unit tests + the
+    #    Phase-2.0-stub mode keep working when aiodocker isn't installed.
+    app.state.settings = settings
+    app.state.event_bus = event_bus
+    # B-INFRA-DISPATCH: AG-UI 0.1.18 places `runId` only on lifecycle
+    # frames (RUN_STARTED / RUN_FINISHED / RUN_ERROR). All intermediate
+    # frames (TEXT_MESSAGE_*, TOOL_CALL_*, *_SNAPSHOT) correlate via
+    # messageId/toolCallId and don't repeat run_id. `_dispatch_frame`
+    # caches the active run_id per session here on RUN_STARTED and uses
+    # it to route every non-lifecycle frame to the right bus topic.
+    # Process-local dict; PoC is single-uvicorn-worker.
+    app.state.active_run_by_session: dict[str, str] = {}
+    # audit_emit closure: each emit opens a fresh AsyncSession + commits
+    # one row, so RunnerRegistry / WarmIdleManager / HeartbeatWatcher can
+    # write audit rows without sharing the request-scoped session.
+    audit_emit = make_audit_emit_closure(get_sessionmaker())
+    runner_registry = RunnerRegistry(
+        warm_idle_s=settings.runner_warm_idle_s,
+        heartbeat_timeout_s=settings.runner_heartbeat_timeout_s,
+        audit_emit=audit_emit,
+    )
+    # B-INFRA-1: hard-fail boot in `docker` mode (default) if DockerRunner
+    # construction fails — silent stub fallback masked the missing
+    # /var/run/docker.sock bind-mount and broke every session-stream path
+    # after first user message. `stub` mode (explicit opt-in) tolerates
+    # missing aiodocker for CI / local-without-docker dev.
+    if settings.kloc_runner_mode == "docker":
+        from src.runner_mgmt.docker_runner import DockerRunner
+
+        docker_runner = DockerRunner(
+            image=settings.runner_image_tag,
+            network=settings.kloc_docker_network,
+            backend_url=settings.backend_url,
+            skills_host_dir=settings.kloc_skills_dir_host,
+            event_bus=event_bus,
+        )
+        runner_registry.set_runner(docker_runner)
+    else:
+        try:
+            from src.runner_mgmt.docker_runner import DockerRunner
+
+            docker_runner = DockerRunner(
+                image=settings.runner_image_tag,
+                network=settings.kloc_docker_network,
+                backend_url=settings.backend_url,
+                skills_host_dir=settings.kloc_skills_dir_host,
+                event_bus=event_bus,
+            )
+            runner_registry.set_runner(docker_runner)
+        except Exception:
+            logger.error(
+                "boot: KLOC_RUNNER_MODE=stub — DockerRunner unavailable; "
+                "registry will reject spawn requests",
+                exc_info=True,
+            )
+    app.state.runner_registry = runner_registry
+
+    # 4. Boot-time orphan-container sweep (AC25). At boot the registry's
+    #    `known_runner_ids()` is empty; any container labelled kloc.role=runner
+    #    from a prior backend process is an orphan to be killed.
+    try:
+        from src.runner_mgmt import sweeper  # type: ignore[attr-defined]
+
+        await sweeper.orphan_sweep(
+            settings, known_runner_ids=runner_registry.known_runner_ids()
+        )
+    except (ImportError, AttributeError):
+        logger.info(
+            "boot: orphan_sweep not yet available (dev-2 Phase 2.D9) — skipping"
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        logger.exception("boot orphan-container sweep failed: %s", e)
+
+    # 5. Boot-time DB orphan-message scan (AC24). Catch ONLY transient
+    #    operational errors (DB unreachable, network blips). Misconfig
+    #    bugs like a missing greenlet (ValueError), import errors, or
+    #    schema mismatches MUST crash boot — masking them was hiding
+    #    QA's greenlet bug.
+    from sqlalchemy.exc import OperationalError, InterfaceError, DBAPIError
+
+    from src.repos.boot import sweep_orphaned_messages
+
+    try:
+        async with engine.begin() as conn:
+            await sweep_orphaned_messages(conn)
+    except (OperationalError, InterfaceError, DBAPIError) as e:
+        logger.exception("boot orphan-message scan: DB unreachable (%s)", e)
+
+    try:
+        yield
+    finally:
+        # Shutdown order: stop runners first, then close DB + S3.
+        try:
+            await runner_registry.shutdown_all()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.exception("runner_registry shutdown failed: %s", e)
+
+        await engine.dispose()
+        await stack.aclose()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="kloc-agent",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+    app.include_router(health.router)
+    app.include_router(sessions.router, prefix="/v1")
+    app.include_router(webhooks.router, prefix="/v1")
+    app.include_router(artifacts.router, prefix="/v1")
+    app.include_router(stop.router, prefix="/v1")
+    app.include_router(internal.router, prefix="/internal")
+    app.include_router(stream.router, prefix="/v1")
+    return app
+
+
+app = create_app()

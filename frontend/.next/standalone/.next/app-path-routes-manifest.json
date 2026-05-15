@@ -1,0 +1,7 @@
+{
+  "/_global-error/page": "/_global-error",
+  "/_not-found/page": "/_not-found",
+  "/api/agent-proxy/route": "/api/agent-proxy",
+  "/api/copilotkit/route": "/api/copilotkit",
+  "/page": "/"
+}

@@ -1,0 +1,343 @@
+"""Streaming SSE endpoints. dev-2-owned half of Track C.
+
+Two routes:
+  - `POST /v1/sessions/{id}/stream` — body is `RunAgentInput`; backend
+    persists the user message, spawns/reuses the runner, sends the
+    inbound message, and streams AG-UI events back as SSE.
+  - `GET /v1/sessions/{id}/stream?run_id=...&last_event_id=...` — replay
+    + tail an in-flight run for reconnects (AC5, AC18).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import uuid
+from typing import Any, AsyncIterator, Optional
+
+from fastapi import APIRouter, HTTPException, Path, Query, Request
+
+from src.db.engine import get_sessionmaker
+from src.db.models import HydrationPayload, McpHttpEndpoint
+from src.repos.audit import AuditRepo
+from src.repos.messages import MessageRepo
+from src.settings import get_settings
+from src.streaming.agui_event_formatter import (
+    is_run_lifecycle_terminal,
+    normalize,
+)
+from src.streaming.debounce import TextDeltaDebouncer
+from src.streaming.event_bus import event_bus
+from src.streaming.execution_registry import execution_registry
+from src.streaming.sse import make_response
+
+log = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+def _get_runner_registry(request: Request):
+    registry = getattr(request.app.state, "runner_registry", None)
+    if registry is None:
+        raise HTTPException(
+            status_code=503,
+            detail="runner_registry not initialised; backend lifespan failed",
+        )
+    return registry
+
+
+@router.post("/sessions/{session_id}/stream")
+async def stream_post(
+    request: Request,
+    session_id: str = Path(...),
+):
+    """Persist the user message FIRST (Contract A invariant #1), then
+    forward to runner, then stream the AG-UI events back."""
+    body = await request.json()
+    run_id = body.get("runId") or body.get("run_id") or str(uuid.uuid4())
+    messages = body.get("messages") or []
+
+    session_uuid = _parse_uuid(session_id)
+    if session_uuid is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid session_id {session_id!r} — must be a UUID",
+        )
+
+    # Contract A #1: persist user message + commit BEFORE forwarding.
+    await _persist_user_message(session_uuid, messages)
+
+    registry = _get_runner_registry(request)
+    hydration_payload = await _build_hydration_payload(
+        session_id=session_id,
+        session_uuid=session_uuid,
+        run_id=run_id,
+    )
+    entry = await registry.get_or_spawn(session_id, hydration_payload)
+    entry.warm_idle.on_user_message()
+
+    # Forward the new user message to the runner via the inbox queue.
+    await entry.inbox.put(
+        {
+            "type": "user_message",
+            "run_id": run_id,
+            "messages": messages,
+        }
+    )
+
+    execution = await execution_registry.get_or_create(session_id, run_id)
+
+    asyncio.create_task(
+        _persist_events(
+            session_id=session_id,
+            session_uuid=session_uuid,
+            run_id=run_id,
+            execution=execution,
+        )
+    )
+
+    async def generator() -> AsyncIterator[dict]:
+        async for event in _live_stream(session_id, run_id, last_seq=None):
+            yield event
+
+    return make_response(request, generator())
+
+
+@router.get("/sessions/{session_id}/stream")
+async def stream_get(
+    request: Request,
+    session_id: str = Path(...),
+    run_id: Optional[str] = Query(None),
+    last_event_id: Optional[int] = Query(None, alias="last_event_id"),
+):
+    """Cursor replay + live tail. AC5 + AC18."""
+    if run_id is None:
+        raise HTTPException(status_code=400, detail="run_id required")
+    execution = await execution_registry.get(session_id, run_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="unknown execution")
+
+    async def generator() -> AsyncIterator[dict]:
+        for entry_dict in execution.replay_from(last_event_id):
+            yield entry_dict["event"]
+        if execution.status != "running":
+            return
+        last_seq = (
+            execution.events[-1]["seq"] if execution.events else last_event_id
+        )
+        async for event in _live_stream(session_id, run_id, last_seq=last_seq):
+            yield event
+
+    return make_response(request, generator())
+
+
+async def _live_stream(
+    session_id: str, run_id: str, last_seq: int | None
+) -> AsyncIterator[dict]:
+    """Subscribe to live runner events. Stops on terminal lifecycle."""
+    async for event in event_bus.subscribe(session_id, run_id):
+        yield event
+        if is_run_lifecycle_terminal(event):
+            return
+
+
+async def _persist_user_message(
+    session_uuid: uuid.UUID, messages: list
+) -> None:
+    user = _extract_user_message(messages)
+    if user is None:
+        return
+    async with get_sessionmaker()() as session:
+        repo = MessageRepo(session)
+        await repo.append(
+            session_id=session_uuid,
+            role="user",
+            content=_extract_text(user),
+            content_parts=(
+                user if not isinstance(user.get("content"), str) else None
+            ),
+            finalize=True,
+        )
+        await session.commit()
+
+
+async def _persist_events(
+    session_id: str,
+    session_uuid: uuid.UUID,
+    run_id: str,
+    execution,
+) -> None:
+    """Tap the event_bus, push every event onto the execution ring AND
+    drive `TextDeltaDebouncer` for Contract A invariant #2.
+
+    Multiple subscribers on the bus is supported (live SSE clients also
+    subscribe in parallel). This task's role is durable persistence."""
+    # AG-UI messageId (str) -> Postgres message UUID for append_delta.
+    # Assistant rows are lazily inserted on the first delta.
+    message_uuid: dict[str, uuid.UUID] = {}
+
+    async def _ensure_assistant_row(agui_msg_id: str) -> uuid.UUID:
+        if agui_msg_id in message_uuid:
+            return message_uuid[agui_msg_id]
+        async with get_sessionmaker()() as session:
+            repo = MessageRepo(session)
+            row = await repo.append(
+                session_id=session_uuid,
+                role="assistant",
+                content="",
+                finalize=False,
+            )
+            await session.commit()
+            message_uuid[agui_msg_id] = row.id
+            return row.id
+
+    async def _append_delta(agui_msg_id: str, delta: str) -> None:
+        row_id = await _ensure_assistant_row(agui_msg_id)
+        async with get_sessionmaker()() as session:
+            repo = MessageRepo(session)
+            await repo.append_delta(row_id, delta)
+            await session.commit()
+
+    async def _finalize(agui_msg_id: str) -> None:
+        row_id = message_uuid.get(agui_msg_id)
+        if row_id is None:
+            return
+        async with get_sessionmaker()() as session:
+            repo = MessageRepo(session)
+            await repo.finalize(row_id)
+            await session.commit()
+
+    debouncer = TextDeltaDebouncer(
+        append_delta=_append_delta, finalize=_finalize
+    )
+
+    async for event in event_bus.subscribe(session_id, run_id):
+        wire = normalize(event)
+        execution.append(wire)
+        kind = wire.get("type")
+        if kind == "TEXT_MESSAGE_CONTENT":
+            await debouncer.on_content(wire["messageId"], wire["delta"])
+        elif kind == "TEXT_MESSAGE_END":
+            await debouncer.on_end(wire["messageId"])
+        if is_run_lifecycle_terminal(wire):
+            return
+
+
+def _extract_user_message(messages: list) -> dict | None:
+    if not messages:
+        return None
+    last = messages[-1]
+    if isinstance(last, dict):
+        role = last.get("role")
+        msg = last
+    else:
+        role = getattr(last, "role", None)
+        msg = (
+            last.model_dump() if hasattr(last, "model_dump") else dict(last)
+        )
+    if role != "user":
+        return None
+    return msg
+
+
+def _extract_text(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # ag-ui InputContent list; pick text parts.
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+        return "".join(parts)
+    return ""
+
+
+def _parse_uuid(value: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(value)
+    except (ValueError, TypeError):
+        return None
+
+
+async def _build_hydration_payload(
+    session_id: str,
+    session_uuid: uuid.UUID,
+    run_id: str,
+) -> HydrationPayload:
+    """Construct the HydrationPayload from durable state.
+
+    Loads the full conversation history from messages + last STATE_SNAPSHOT
+    from audit_log, and assembles a per-spawn `runner_id` + HMAC secret."""
+    settings = get_settings()
+
+    async with get_sessionmaker()() as session:
+        messages = await MessageRepo(session).list_for_session(
+            session_uuid, after_seq=None, limit=10_000
+        )
+        prior_messages = [_message_to_dict(m) for m in messages]
+        snap = await AuditRepo(session).last_state_snapshot(session_uuid)
+        last_state: dict[str, Any] = {}
+        if snap is not None and isinstance(snap.payload, dict):
+            last_state = snap.payload.get("state") or {}
+
+    base_prompt = (
+        "You are a code-intelligence research agent. Use the available "
+        "MCP tools to look things up and the `summarizer` sub-agent for "
+        "final answers. Cite symbol FQNs verbatim."
+    )
+
+    # Contract D pivot: agent reaches kloc-intelligence over Streamable
+    # HTTP MCP, NOT via a stdio child. The operator brings up the
+    # kloc-intelligence stack (Neo4j + Qdrant + `kloc-intelligence
+    # mcp-server-http`) out of band; the agent treats it as an opaque
+    # MCP endpoint. `settings.kloc_mcp_url` defaults to
+    # `http://host.docker.internal:8765/mcp` and is overridable by env.
+    # Fallback to that string literal until dev-1's settings field
+    # ships in parallel.
+    mcp_url = getattr(
+        settings, "kloc_mcp_url", "http://host.docker.internal:8765/mcp"
+    )
+
+    # LLM provider pivot: operator selected Gemini 3.1 Pro. Defaults
+    # are env-driven so the operator can override either provider or
+    # model_id without code change. Falls back to `settings.llm_provider`
+    # if `LLM_PROVIDER` env isn't set so the existing settings field
+    # remains authoritative when dev-1 wires KLOC_LLM_PROVIDER through.
+    llm_provider = os.environ.get("LLM_PROVIDER") or settings.llm_provider
+    model_id_default = (
+        "gemini-3.1-pro"
+        if llm_provider == "gemini"
+        else "claude-3-5-haiku-20241022"
+    )
+    model_id = os.environ.get("LLM_MODEL_ID", model_id_default)
+
+    return HydrationPayload(
+        session_id=session_id,
+        run_id=run_id,
+        runner_id=str(uuid.uuid4()),
+        runner_secret=uuid.uuid4().hex,
+        system_prompt=base_prompt,
+        model_id=model_id,
+        llm_provider=llm_provider,
+        prior_messages=prior_messages,
+        state=last_state,
+        mcp_endpoints=[McpHttpEndpoint(url=mcp_url)],
+        skills_dir="/skills",
+        backend_url=settings.backend_url,
+        inbox_poll_timeout_s=25,
+        heartbeat_interval_s=15,
+    )
+
+
+def _message_to_dict(msg: Any) -> dict[str, Any]:
+    """Convert ORM Message row to a dict shaped for ag-ui-protocol's
+    Message union. The runner re-passes this list into
+    `RunAgentInput.messages`."""
+    return {
+        "id": str(msg.id),
+        "role": msg.role,
+        "content": msg.content or "",
+    }

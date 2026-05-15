@@ -1,0 +1,19 @@
+# Override for local dev — bind-mount src/ for hot reload via uvicorn --reload.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+
+  backend:
+    # No OTel auto-instrument in dev — keeps reload fast.
+    command:
+      - uvicorn
+      - src.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    volumes:
+      - ./src:/app/src
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini

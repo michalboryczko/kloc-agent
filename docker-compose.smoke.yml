@@ -1,0 +1,20 @@
+services:
+  postgres:
+    ports: !override
+      - "5433:5432"
+  minio:
+    ports: !override
+      - "9010:9000"
+      - "9011:9001"
+  backend:
+    ports: !override
+      - "8002:8000"
+    environment:
+      BACKEND_URL: http://backend:8000
+      LLM_MODEL_ID: ${LLM_MODEL_ID:-gemini-3.1-pro-preview}
+  frontend:
+    environment:
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:8002
+      BACKEND_URL: http://backend:8000
+    ports: !override
+      - "3000:3000"

@@ -1,0 +1,211 @@
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kloc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-kloc_agent}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [kloc]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kloc} -d ${POSTGRES_DB:-kloc_agent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    networks: [kloc]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  mc-init:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      ARTIFACT_BUCKET: ${ARTIFACT_BUCKET:-kloc-agent-artifacts-dev}
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      /usr/bin/mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\";
+      /usr/bin/mc mb --ignore-existing local/$$ARTIFACT_BUCKET;
+      /usr/bin/mc anonymous set none local/$$ARTIFACT_BUCKET;
+      echo 'mc-init done';
+      "
+    restart: on-failure
+    networks: [kloc]
+
+  skills-init:
+    # Seeds the `kloc-skills` named volume with the repo-root `./skills/`
+    # tree on first boot. Runners then mount the named volume read-only
+    # via aiodocker — the bind-from-compose vs aiodocker path-resolution
+    # mismatch goes away because the named volume is Docker-managed.
+    image: alpine:3.20
+    volumes:
+      - ./skills:/source:ro
+      - kloc-skills:/dest
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      cp -R /source/. /dest/;
+      echo 'skills-init done';
+      "
+    restart: "no"
+    networks: [kloc]
+
+  backend-migrate:
+    build:
+      context: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-kloc}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-kloc_agent}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [kloc]
+    restart: "no"
+
+  backend:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-kloc}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-kloc_agent}
+      MINIO_ENDPOINT_URL: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_USE_SSL: "false"
+      ARTIFACT_BUCKET: ${ARTIFACT_BUCKET:-kloc-agent-artifacts-dev}
+      RUNNER_WARM_IDLE_S: ${RUNNER_WARM_IDLE_S:-60}
+      RUNNER_HEARTBEAT_TIMEOUT_S: ${RUNNER_HEARTBEAT_TIMEOUT_S:-30}
+      RUNNER_IMAGE_TAG: ${RUNNER_IMAGE_TAG:-kloc-agent-runner:dev}
+      # Operator pivot: Gemini is the default provider. `LLM_PROVIDER` is
+      # still env-overridable per session deploy.
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      # `GEMINI_API_KEY` is the operator's primary key now; the existing
+      # `ANTHROPIC_*` vars stay because the runner-side factory still
+      # supports anthropic when `LLM_PROVIDER=anthropic`.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # B-INFRA-9: forwarded to each per-session runner container by
+      # dev-2's docker_runner.py — empty default keeps compose happy
+      # when the operator hasn't set it on the host; the forwarding
+      # loop filters out empty values.
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      BACKEND_URL: http://backend:8000
+      KLOC_HOOK_SECRET: ${KLOC_HOOK_SECRET:-dev-secret-please-rotate}
+      KLOC_DENY_TOOLS: ${KLOC_DENY_TOOLS:-}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-kloc-agent}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-console}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-console}
+      # Runner spawn mode. Defaults to "docker" — backend spawns per-session
+      # runner containers on the host daemon via the bind-mounted socket
+      # below. Set to "stub" to skip DockerRunner construction entirely (CI,
+      # local-without-docker dev). Real PoC traffic requires "docker".
+      KLOC_RUNNER_MODE: ${KLOC_RUNNER_MODE:-docker}
+      # Streamable-HTTP MCP URL the runner uses to reach kloc-intelligence.
+      # kloc-intelligence runs as its own docker-compose stack on the
+      # operator host (Neo4j + Qdrant + `mcp-server-http`); the runner
+      # container reaches it via Docker's host-gateway alias.
+      KLOC_MCP_URL: ${KLOC_MCP_URL:-http://host.docker.internal:8765/mcp}
+    extra_hosts:
+      # Linux compatibility for the host-gateway alias. Docker Desktop
+      # provides this automatically; the explicit entry is a no-op there
+      # and required on Linux engines.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Docker-outside-of-Docker (sibling-container pattern). The backend
+      # manages per-session runner containers on the host daemon via
+      # aiodocker → DockerRunner. Required when KLOC_RUNNER_MODE=docker.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # B-INFRA-3: named volume so backend writes + runner reads see the
+      # same Docker-managed filesystem. A relative bind-mount would
+      # resolve host-side (compose) vs container-side (aiodocker), so
+      # `/tmp/hydration-<rid>.json` from inside the backend container
+      # wouldn't exist when the runner tries to mount it.
+      - kloc-hydration:/tmp/kloc-hydration
+      # Audit point 1: same Docker-managed shared volume for the skills
+      # tree. Read-only inside the backend (seeding happens via the
+      # skills-init service); runners mount the same named volume.
+      - kloc-skills:/skills-source:ro
+    networks: [kloc]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      backend-migrate:
+        condition: service_completed_successfully
+      mc-init:
+        condition: service_completed_successfully
+      skills-init:
+        condition: service_completed_successfully
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      BACKEND_URL: http://backend:8000
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
+      COPILOTKIT_AGENT_NAME: kloc_agent
+      NEXT_TELEMETRY_DISABLED: "1"
+    networks: [kloc]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+networks:
+  # Explicit `name: kloc` so the bridge is independent of compose project
+  # name. aiodocker spawns per-session runner containers onto this exact
+  # network from inside the backend; without a fixed name a project rename
+  # or COMPOSE_PROJECT_NAME override breaks runner→backend reachability.
+  kloc:
+    name: kloc
+
+volumes:
+  postgres-data:
+  minio-data:
+  # B-INFRA-5: force explicit names so docker-compose does NOT prefix
+  # with the project name. Backend container mounts these via compose
+  # (which would prefix to `kloc-agent_kloc-hydration` etc); per-session
+  # runner containers are spawned by aiodocker and pass the bare
+  # `kloc-hydration` / `kloc-skills` names. Without the explicit `name:`
+  # override the two resolve to different Docker volumes and the runner
+  # reads an empty volume (FileNotFoundError on /run/kloc/<rid>.json).
+  kloc-hydration:
+    name: kloc-hydration
+  kloc-skills:
+    name: kloc-skills
