@@ -10,6 +10,7 @@ import {
   type Message,
   type SessionListItem,
 } from "@/lib/api";
+import { A11yChatTextarea } from "@/components/A11yChatTextarea";
 import { AgentBody } from "@/components/AgentBody";
 import { SessionPicker } from "@/components/SessionPicker";
 import { SessionRail } from "@/components/SessionRail";
@@ -117,14 +118,16 @@ export default function HomePage() {
         <div className="grid grid-cols-1 min-[880px]:grid-cols-[280px_1fr] min-h-0 overflow-hidden">
           <SessionRail sessionId={picked.sessionId} />
           <div className="chat-pane min-h-0 flex flex-col">
-            <CopilotChat
-              className="kloc-copilot-chat flex-1 min-h-0"
-              labels={{
-                title: "kloc analyst",
-                initial: "Ask anything about the indexed PHP codebase.",
-              }}
-              instructions="You are kloc, an analyst assistant over a PHP codebase indexed by kloc-intelligence. Use the available MCP tools to answer questions about the code."
-            />
+            <A11yChatTextarea label="Ask kloc analyst">
+              <CopilotChat
+                className="kloc-copilot-chat flex-1 min-h-0"
+                labels={{
+                  title: "kloc analyst",
+                  initial: "Ask anything about the indexed PHP codebase.",
+                }}
+                instructions="You are kloc, an analyst assistant over a PHP codebase indexed by kloc-intelligence. Use the available MCP tools to answer questions about the code."
+              />
+            </A11yChatTextarea>
           </div>
         </div>
       </CopilotKit>
