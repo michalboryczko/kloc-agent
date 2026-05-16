@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -32,6 +33,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+# Short window for collapsing back-to-back is_alive checks (e.g. registry
+# revalidation followed by spawn-lock double-check) onto a single Docker
+# daemon round-trip. Long enough to absorb a hot reuse loop, short enough
+# that a freshly-killed container is detected on the next call cycle.
+_IS_ALIVE_TTL_S = 0.05
+
+
 @dataclass
 class RegistryEntry:
     handle: "RunnerHandle"
@@ -39,12 +47,25 @@ class RegistryEntry:
     heartbeat: HeartbeatWatcher
     inbox: asyncio.Queue
     audit_emit: Callable[[str, dict], Awaitable[None]] | None
-    # In-flight tool calls: tool_call_id -> tool_name. Populated on
-    # BeforeToolCall webhook receipt (dev-1's src/api/webhooks.py via
-    # registry.on_tool_call_started); cleared on AfterToolCall via
-    # on_tool_call_completed. Used by `_on_crash` to emit
-    # `tool_call.crashed` per plan §575 / AC20.
     in_flight_tool_calls: dict[str, str] = field(default_factory=dict)
+    _is_alive_cache: tuple[bool, float] | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    async def is_alive(self, runner: "Runner") -> bool:
+        """TTL-cached wrapper around `runner.is_alive(self.handle)`.
+
+        Repeated calls within `_IS_ALIVE_TTL_S` return the cached value so
+        a single hot reuse loop does not fan out to the Docker daemon. A
+        miss (no cache, or expired) calls the runner and caches the result.
+        """
+        now = time.monotonic()
+        cached = self._is_alive_cache
+        if cached is not None and (now - cached[1]) < _IS_ALIVE_TTL_S:
+            return cached[0]
+        value = await runner.is_alive(self.handle)
+        self._is_alive_cache = (value, now)
+        return value
 
 
 AuditEmitFn = Callable[[str, dict], Awaitable[None]]
@@ -217,7 +238,7 @@ class RunnerRegistry:
             # After the kill task settles, the entry may already be gone
             # (`_on_evict` removed it). Re-fetch from the registry.
             entry = await self._get_entry(session_id)
-            if entry is not None and await self._runner.is_alive(entry.handle):
+            if entry is not None and await entry.is_alive(self._runner):
                 return entry
             # Either entry was evicted by the kill task, or the container
             # is dead despite the entry still existing (rare; e.g. crash
@@ -236,9 +257,7 @@ class RunnerRegistry:
             # Double-check: a concurrent caller may have already
             # installed a live entry while we waited for the lock.
             existing = await self._get_entry(session_id)
-            if existing is not None and await self._runner.is_alive(
-                existing.handle
-            ):
+            if existing is not None and await existing.is_alive(self._runner):
                 return existing
 
             handle = await self._runner.spawn(hydration_payload)
