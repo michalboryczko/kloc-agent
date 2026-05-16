@@ -157,15 +157,12 @@ async def _run_one_turn(
 ) -> None:
     from ag_ui.core.types import RunAgentInput  # type: ignore
 
-    # Architecture.md §3.4: ag_ui_strands.StrandsAgent rebuilds the
-    # internal `messages` list from `RunAgentInput.messages` on every
-    # call. The backend's `src/api/stream.py` always pushes the *new*
-    # user turn(s) in `inbound["messages"]`; `prior_messages` carries
-    # the full history loaded from Postgres at spawn time. Merge ONLY
-    # on the first turn of a warm container; on subsequent turns the
-    # backend has already persisted prior assistant replies + new
-    # user turn and pushes the cumulative list itself, so prepending
-    # `prior_messages` would duplicate turn 0.
+    # StrandsAgent rebuilds its internal `messages` list from
+    # `RunAgentInput.messages` on every call. The backend always pushes the
+    # new user turn(s) in `inbound["messages"]`; `prior_messages` carries the
+    # full history loaded at spawn time. Merge ONLY on the first turn of a
+    # warm container; on subsequent turns the backend already pushes the
+    # cumulative list and prepending `prior_messages` would duplicate turn 0.
     if first_turn:
         messages = list(payload.get("prior_messages") or [])
         messages.extend(inbound.get("messages") or [])
@@ -190,7 +187,7 @@ async def _run_one_turn(
                 else dict(event)
             )
             await channel.emit(wire)
-    except Exception as exc:  # plan D18
+    except Exception as exc:
         log.exception("runner.turn_failed")
         await channel.emit(
             {
@@ -206,16 +203,11 @@ async def _run_one_turn(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
-    # H4 — intentionally deferred per dev-3. `opentelemetry-instrument`
-    # (runner/Dockerfile ENTRYPOINT) installs the OTel SDK tracer/meter
-    # provider from OTEL_TRACES_EXPORTER env at boot;
-    # `OTEL_TRACES_EXPORTER=otlp,console` (set via backend spawn env)
-    # already registers the ConsoleSpanExporter. An explicit
-    # `StrandsTelemetry().setup_console_exporter()` would duplicate
-    # spans on stdout or no-op against the pre-installed provider.
-    # Revisit only if Strands' internal tool-call spans don't surface
-    # in auto-instrumentation traces (open question per
-    # investigation.md §8).
+    # No explicit StrandsTelemetry setup here: the Dockerfile ENTRYPOINT
+    # wraps this process with `opentelemetry-instrument`, which installs the
+    # OTel SDK tracer/meter provider from OTEL_* env vars. An explicit
+    # `setup_console_exporter()` here would duplicate or no-op against that
+    # pre-installed provider.
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
