@@ -18,16 +18,9 @@ settings validation happy.
 """
 from __future__ import annotations
 
-import os
-
-# Boot-time `Settings` validates the configured LLM provider has a key.
-# Tests don't talk to an LLM — flip to stub mode before importing main.
-os.environ.setdefault("KLOC_STUB_MODE", "true")
-
 import pytest
+from _pytest.monkeypatch import MonkeyPatch
 from fastapi.testclient import TestClient
-
-from src.main import app
 
 
 pytestmark = pytest.mark.unit
@@ -36,8 +29,31 @@ pytestmark = pytest.mark.unit
 ORIGIN = "http://localhost:3000"
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _stub_mode_for_module():
+    # Boot-time `Settings` validates the configured LLM provider has a
+    # key. These tests don't talk to an LLM, so set stub mode for the
+    # duration of the module. Using `MonkeyPatch.context()` (and not
+    # `os.environ.setdefault` at module scope) so the env mutation is
+    # rolled back after the last test in this module rather than
+    # leaking into unrelated tests in the same pytest invocation.
+    mp = MonkeyPatch()
+    mp.setenv("KLOC_STUB_MODE", "true")
+    yield
+    mp.undo()
+
+
 @pytest.fixture(scope="module")
-def client() -> TestClient:
+def client(_stub_mode_for_module) -> TestClient:
+    # Import `app` lazily inside the fixture so the import-time read of
+    # `Settings` happens AFTER `KLOC_STUB_MODE` is set above; importing
+    # at module scope would lock in the env state from whatever ran
+    # before this file in the test session.
+    from src.main import app
+    from src.settings import get_settings
+
+    get_settings.cache_clear()
+
     # TestClient used WITHOUT `with ... as`: Starlette will not start the
     # lifespan context, so the test is pure routing/middleware and doesn't
     # require Postgres / MinIO / Docker.
