@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 5
+current_phase: 6
 status: Phase 5 complete
-last_updated: "2026-05-16T19:42:46.878Z"
+last_updated: "2026-05-16T20:16:40.496Z"
 progress:
   total_phases: 6
   completed_phases: 5
@@ -21,7 +21,7 @@ See: `.planning/PROJECT.md` (updated 2026-05-16)
 
 **Core value:** A single analyst can have a live, resumable, audit-complete agent conversation against an indexed codebase — and trust that every event, message, and tool call is reliably persisted, ordered correctly, and never silently dropped.
 
-**Current focus:** Phase 5 — UI structural fix, polish, a11y, dead code
+**Current focus:** Phase 6 — Frontend code quality
 
 ---
 
@@ -29,7 +29,7 @@ See: `.planning/PROJECT.md` (updated 2026-05-16)
 
 **Milestone:** Hardening — internal beta / demo-stable
 **Started:** 2026-05-16
-**Current phase:** 5
+**Current phase:** 6
 **Phases complete:** 0 / 6
 **Requirements complete:** 0 / 26
 
