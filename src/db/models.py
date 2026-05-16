@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field
 from sqlalchemy import (
@@ -60,22 +60,7 @@ AuditEventType = Literal[
 ]
 
 
-AUDIT_EVENT_TYPES: frozenset[str] = frozenset(
-    [
-        "session_opened",
-        "session_closed",
-        "message_persisted",
-        "stream_orphaned",
-        "tool_call.started",
-        "tool_call.completed",
-        "tool_call.denied",
-        "tool_call.crashed",
-        "runner_spawned",
-        "runner_warm_idle_evicted",
-        "runner_heartbeat_lost",
-        "artifact_registered",
-    ]
-)
+AUDIT_EVENT_TYPES: frozenset[str] = frozenset(get_args(AuditEventType))
 
 
 MessageRole = Literal["user", "assistant", "system", "tool"]

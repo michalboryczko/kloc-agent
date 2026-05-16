@@ -49,6 +49,7 @@ type IncomingBody = {
   context?: unknown[];
   state?: Record<string, unknown>;
   forwardedProps?: Record<string, unknown>;
+  properties?: Record<string, unknown>;
   lastEventId?: string;
 };
 
@@ -56,9 +57,11 @@ type IncomingBody = {
 // it to discover the backend `session_id` (the page bootstraps a session and
 // passes the id to `useCoAgent`'s state).
 function resolveSessionId(body: IncomingBody): string | null {
+  const props = body.properties ?? {};
   const fwd = body.forwardedProps ?? {};
   const state = body.state ?? {};
   const candidate =
+    (props["session_id"] as string | undefined) ??
     (fwd["session_id"] as string | undefined) ??
     (fwd["sessionId"] as string | undefined) ??
     (state["session_id"] as string | undefined);
@@ -92,6 +95,12 @@ export const POST = async (req: NextRequest) => {
 
   const sessionId = resolveSessionId(body);
   if (!sessionId) {
+    // DIAG: dump the keys we see so we can wire up the new CopilotKit
+    // state-forwarding contract.
+    console.warn("[agent-proxy] no session_id; body keys=", Object.keys(body), {
+      state: body.state,
+      forwardedProps: body.forwardedProps,
+    });
     return Response.json(
       {
         error:

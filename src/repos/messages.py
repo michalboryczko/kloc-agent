@@ -17,9 +17,13 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import AuditLog, Message, MessageRole
+
+
+_MAX_SEQ_RETRIES = 5
 
 
 class MessageRepo:
@@ -46,20 +50,41 @@ class MessageRepo:
     ) -> Message:
         """Insert a Message. For streaming assistant messages, leave
         `finalize=False`; the streaming layer later calls `finalize()` and
-        meanwhile appends content via `append_delta`."""
-        row = Message(
-            session_id=session_id,
-            role=role,
-            content=content,
-            content_parts=content_parts,
-            model=model,
-            parent_message_id=parent_message_id,
-            seq=await self._next_seq(session_id),
-            finalized_at=datetime.now(timezone.utc) if finalize else None,
-        )
-        self._session.add(row)
-        await self._session.flush()
-        return row
+        meanwhile appends content via `append_delta`.
+
+        `_next_seq` + INSERT is not atomic at the SQL level (two
+        SELECT max(seq)+1 reads can race); the per-session UNIQUE
+        constraint `uq_messages_session_seq` is the actual atomic
+        guarantee. On UNIQUE violation (concurrent insert won the race)
+        we rollback the savepoint and retry up to `_MAX_SEQ_RETRIES`
+        times with a fresh seq read.
+        """
+        last_err: IntegrityError | None = None
+        for _ in range(_MAX_SEQ_RETRIES):
+            sp = await self._session.begin_nested()
+            row = Message(
+                session_id=session_id,
+                role=role,
+                content=content,
+                content_parts=content_parts,
+                model=model,
+                parent_message_id=parent_message_id,
+                seq=await self._next_seq(session_id),
+                finalized_at=datetime.now(timezone.utc) if finalize else None,
+            )
+            self._session.add(row)
+            try:
+                await self._session.flush()
+            except IntegrityError as e:
+                last_err = e
+                await sp.rollback()
+                continue
+            await sp.commit()
+            return row
+        # Exhausted retries — re-raise the last IntegrityError so the
+        # caller sees the real DB error rather than a silent failure.
+        assert last_err is not None
+        raise last_err
 
     async def append_delta(
         self,

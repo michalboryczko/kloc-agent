@@ -14,9 +14,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.deps import get_session
+from src.db.models import Message, Session as SessionModel
 from src.repos.audit import AuditRepo
 from src.repos.messages import MessageRepo
 from src.repos.sessions import SessionRepo
@@ -80,6 +82,20 @@ class PostMessageResponse(BaseModel):
     stream_url: str
 
 
+class SessionListItem(BaseModel):
+    id: uuid.UUID
+    title: str
+    runner_state: str
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
+    closed_at: datetime | None
+
+
+class SessionList(BaseModel):
+    sessions: list[SessionListItem]
+
+
 @router.post(
     "/sessions",
     response_model=CreateSessionResponse,
@@ -105,6 +121,46 @@ async def create_session(
     )
     await db.commit()
     return CreateSessionResponse(session_id=row.id, created_at=row.created_at)
+
+
+@router.get("/sessions", response_model=SessionList)
+async def list_sessions(
+    include_closed: bool = False,
+    db: AsyncSession = Depends(get_session),
+) -> SessionList:
+    """List sessions for the hardcoded analyst, newest first.
+
+    Joins `messages` with a GROUP BY so each row carries its message
+    count in one query — frontend uses this to render a chat picker on
+    page load (replaces the prior localStorage auto-resume behavior).
+    """
+    stmt = (
+        select(
+            SessionModel,
+            func.count(Message.id).label("message_count"),
+        )
+        .outerjoin(Message, Message.session_id == SessionModel.id)
+        .where(SessionModel.analyst_id == HARDCODED_ANALYST_ID)
+        .group_by(SessionModel.id)
+        .order_by(SessionModel.created_at.desc())
+    )
+    if not include_closed:
+        stmt = stmt.where(SessionModel.closed_at.is_(None))
+    rows = (await db.execute(stmt)).all()
+    return SessionList(
+        sessions=[
+            SessionListItem(
+                id=s.id,
+                title=s.title,
+                runner_state=s.runner_state,
+                message_count=int(count),
+                created_at=s.created_at,
+                updated_at=s.updated_at,
+                closed_at=s.closed_at,
+            )
+            for s, count in rows
+        ]
+    )
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetail)

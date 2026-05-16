@@ -65,3 +65,23 @@ async def test_end_without_content_still_finalizes():
     await debouncer.on_end("m1")
     assert flushed == []
     assert finalized == ["m1"]
+
+
+async def test_timer_firing_after_on_end_does_not_raise():
+    """Regression: previously `on_end` did `_buffers.pop(...)` THEN
+    cancelled the timer. A timer firing in that gap saw the buffer as
+    None and could raise. Fix: cancel timer first, then pop.
+
+    We exercise the path by ending the message immediately after a small
+    chunk and waiting past the flush interval — if the stale timer task
+    still pokes at the buffer the await would raise here."""
+    import asyncio
+
+    debouncer, flushed, finalized = _make_debouncer()
+    await debouncer.on_content("m1", "abc")
+    await debouncer.on_end("m1")
+    # Give any stale timer time to expire.
+    await asyncio.sleep(FLUSH_INTERVAL_S * 1.5)
+
+    assert flushed == [("m1", "abc")]
+    assert finalized == ["m1"]

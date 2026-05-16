@@ -21,6 +21,7 @@ from typing import AsyncIterator
 import aioboto3
 from botocore.config import Config
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from src.api import artifacts, health, internal, sessions, stop, stream, webhooks
 from src.db.engine import create_engine_for_settings, get_sessionmaker
@@ -80,6 +81,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # it to route every non-lifecycle frame to the right bus topic.
     # Process-local dict; PoC is single-uvicorn-worker.
     app.state.active_run_by_session: dict[str, str] = {}
+    # Resume / replay buffer: under reconnect a non-lifecycle frame
+    # may arrive before the new run's RUN_STARTED has been observed.
+    # `_dispatch_frame` parks them per-session here and flushes when
+    # the matching RUN_STARTED lands. Bounded; see _PRE_RUN_BUFFER_CAP.
+    app.state.pending_pre_run_started: dict[str, list[dict]] = {}
     # audit_emit closure: each emit opens a fresh AsyncSession + commits
     # one row, so RunnerRegistry / WarmIdleManager / HeartbeatWatcher can
     # write audit rows without sharing the request-scoped session.
@@ -174,6 +180,20 @@ def create_app() -> FastAPI:
         title="kloc-agent",
         version="0.1.0",
         lifespan=lifespan,
+    )
+    # CORS: install BEFORE routers so browser preflight (OPTIONS) for any
+    # mounted route is handled by Starlette's CORSMiddleware instead of
+    # falling through to the router's 405. Allowed origins come from
+    # `KLOC_CORS_ALLOW_ORIGINS` (comma-separated env var); default is the
+    # Next.js dev server at http://localhost:3000.
+    _settings = get_settings()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_settings.cors_allow_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-Id", "Content-Type"],
     )
     app.include_router(health.router)
     app.include_router(sessions.router, prefix="/v1")

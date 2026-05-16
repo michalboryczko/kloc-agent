@@ -77,6 +77,13 @@ async def stream_post(
     entry = await registry.get_or_spawn(session_id, hydration_payload)
     entry.warm_idle.on_user_message()
 
+    # Subscribe-before-publish: register the SSE queue BEFORE telling the
+    # runner to start. A warm runner can begin emitting events the moment
+    # `inbox.put` completes, and `event_bus.publish` drops events when no
+    # subscriber queue exists yet. Registering first guarantees the queue
+    # is in `_subs` when the runner's first event lands.
+    queue = await event_bus.register(session_id, run_id)
+
     # Forward the new user message to the runner via the inbox queue.
     await entry.inbox.put(
         {
@@ -88,7 +95,7 @@ async def stream_post(
 
     execution = await execution_registry.get_or_create(session_id, run_id)
 
-    asyncio.create_task(
+    persist_task = asyncio.create_task(
         _persist_events(
             session_id=session_id,
             session_uuid=session_uuid,
@@ -96,10 +103,21 @@ async def stream_post(
             execution=execution,
         )
     )
+    persist_task.add_done_callback(_log_persist_task_result)
+    # Track the task on app.state so reconnects don't double-spawn the
+    # persister and lifespan can drain it on shutdown.
+    pending = getattr(request.app.state, "persist_tasks", None)
+    if pending is None:
+        pending = set()
+        request.app.state.persist_tasks = pending
+    pending.add(persist_task)
+    persist_task.add_done_callback(pending.discard)
 
     async def generator() -> AsyncIterator[dict]:
-        async for event in _live_stream(session_id, run_id, last_seq=None):
+        async for event in event_bus.consume(session_id, run_id, queue):
             yield event
+            if is_run_lifecycle_terminal(event):
+                return
 
     return make_response(request, generator())
 
@@ -172,16 +190,25 @@ async def _persist_events(
     drive `TextDeltaDebouncer` for Contract A invariant #2.
 
     Multiple subscribers on the bus is supported (live SSE clients also
-    subscribe in parallel). This task's role is durable persistence."""
+    subscribe in parallel). This task's role is durable persistence.
+
+    Connection lifetime: previously each TEXT_MESSAGE_CONTENT delta
+    opened + closed a fresh AsyncSession, saturating the asyncpg pool
+    under N concurrent sessions. We now hold one AsyncSession for the
+    coroutine's lifetime and commit per delta. The pool checkout is
+    O(1) per run instead of O(deltas).
+    """
+    sessionmaker = get_sessionmaker()
     # AG-UI messageId (str) -> Postgres message UUID for append_delta.
     # Assistant rows are lazily inserted on the first delta.
     message_uuid: dict[str, uuid.UUID] = {}
 
-    async def _ensure_assistant_row(agui_msg_id: str) -> uuid.UUID:
-        if agui_msg_id in message_uuid:
-            return message_uuid[agui_msg_id]
-        async with get_sessionmaker()() as session:
-            repo = MessageRepo(session)
+    async with sessionmaker() as session:
+        repo = MessageRepo(session)
+
+        async def _ensure_assistant_row(agui_msg_id: str) -> uuid.UUID:
+            if agui_msg_id in message_uuid:
+                return message_uuid[agui_msg_id]
             row = await repo.append(
                 session_id=session_uuid,
                 role="assistant",
@@ -192,36 +219,47 @@ async def _persist_events(
             message_uuid[agui_msg_id] = row.id
             return row.id
 
-    async def _append_delta(agui_msg_id: str, delta: str) -> None:
-        row_id = await _ensure_assistant_row(agui_msg_id)
-        async with get_sessionmaker()() as session:
-            repo = MessageRepo(session)
+        async def _append_delta(agui_msg_id: str, delta: str) -> None:
+            row_id = await _ensure_assistant_row(agui_msg_id)
             await repo.append_delta(row_id, delta)
             await session.commit()
 
-    async def _finalize(agui_msg_id: str) -> None:
-        row_id = message_uuid.get(agui_msg_id)
-        if row_id is None:
-            return
-        async with get_sessionmaker()() as session:
-            repo = MessageRepo(session)
+        async def _finalize(agui_msg_id: str) -> None:
+            row_id = message_uuid.get(agui_msg_id)
+            if row_id is None:
+                return
             await repo.finalize(row_id)
             await session.commit()
 
-    debouncer = TextDeltaDebouncer(
-        append_delta=_append_delta, finalize=_finalize
-    )
+        debouncer = TextDeltaDebouncer(
+            append_delta=_append_delta, finalize=_finalize
+        )
 
-    async for event in event_bus.subscribe(session_id, run_id):
-        wire = normalize(event)
-        execution.append(wire)
-        kind = wire.get("type")
-        if kind == "TEXT_MESSAGE_CONTENT":
-            await debouncer.on_content(wire["messageId"], wire["delta"])
-        elif kind == "TEXT_MESSAGE_END":
-            await debouncer.on_end(wire["messageId"])
-        if is_run_lifecycle_terminal(wire):
-            return
+        async for event in event_bus.subscribe(session_id, run_id):
+            wire = normalize(event)
+            execution.append(wire)
+            kind = wire.get("type")
+            if kind == "TEXT_MESSAGE_CONTENT":
+                await debouncer.on_content(wire["messageId"], wire["delta"])
+            elif kind == "TEXT_MESSAGE_END":
+                await debouncer.on_end(wire["messageId"])
+            if is_run_lifecycle_terminal(wire):
+                return
+
+
+def _log_persist_task_result(task: asyncio.Task) -> None:
+    """Done-callback for the fire-and-forget persistence task. Without
+    this, exceptions inside `_persist_events` (UNIQUE-violation on
+    concurrent inserts, pool-checkout timeout, etc.) disappear into
+    asyncio's default exception handler and the assistant message
+    ends up empty in the DB with no diagnostic trail."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.exception(
+            "stream._persist_events_failed", exc_info=exc
+        )
 
 
 def _extract_user_message(messages: list) -> dict | None:
@@ -308,7 +346,7 @@ async def _build_hydration_payload(
     # remains authoritative when dev-1 wires KLOC_LLM_PROVIDER through.
     llm_provider = os.environ.get("LLM_PROVIDER") or settings.llm_provider
     model_id_default = (
-        "gemini-3.1-pro"
+        "gemini-3.1-pro-preview"
         if llm_provider == "gemini"
         else "claude-3-5-haiku-20241022"
     )

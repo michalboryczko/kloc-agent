@@ -1,114 +1,83 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useCoAgent, useCopilotAction } from "@copilotkit/react-core";
+import { CopilotKit } from "@copilotkit/react-core";
 import { CopilotSidebar } from "@copilotkit/react-ui";
-import { createSession } from "@/lib/api";
-import { ToolCallCard } from "@/components/ToolCallCard";
+import {
+  createSession,
+  listMessages,
+  listSessions,
+  type Message,
+  type SessionListItem,
+} from "@/lib/api";
+import { AgentBody } from "@/components/AgentBody";
 
-type KlocAgentState = {
-  session_id?: string;
-  // Latest STATE_SNAPSHOT keys from the runner (kept loose for PoC).
-  runner_state?: "fresh" | "warm" | "evicted" | "crashed";
-  artifacts?: Array<{ id: string; filename: string }>;
+const AGENT_NAME =
+  process.env.NEXT_PUBLIC_COPILOTKIT_AGENT_NAME ?? "kloc_agent";
+
+type PickedSession = {
+  sessionId: string;
+  initialMessages: Message[];
 };
 
 export default function HomePage() {
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [bootError, setBootError] = useState<string | null>(null);
+  const [picked, setPicked] = useState<PickedSession | null>(null);
+  const [sessions, setSessions] = useState<SessionListItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
-  // Bootstrap a session on first load. The session_id is persisted in
-  // localStorage so tab-reload reuses the same session. Two AC18 paths to
-  // distinguish:
-  //   (a) Mid-stream network drop (tab still open): CopilotKit's HttpAgent
-  //       handles auto-resume — when its SSE connection drops it re-POSTs
-  //       the same RunAgentInput with `lastEventId`, which the agent-proxy
-  //       forwards as `?last_event_id=…`. Backend's ExecutionRegistry
-  //       replays buffered events after the cursor. No frontend work
-  //       beyond what the proxy already does.
-  //   (b) Tab close then re-open: CopilotKit starts a fresh runtime, so
-  //       the in-flight run is unrecoverable from the UI. The recommended
-  //       PoC behaviour is: on cold mount, refetch persisted history via
-  //       `GET /v1/sessions/{id}/messages` (REST, not SSE) and let the
-  //       analyst keep chatting with the same session_id. CopilotKit
-  //       1.52.1 doesn't expose a hook to seed history into the visible
-  //       transcript, so this is wired below as state-mirror only — the
-  //       full SSE-replay path is a follow-on for v2.
   useEffect(() => {
+    if (picked) return;
     let cancelled = false;
-    const stored =
-      typeof window !== "undefined"
-        ? window.localStorage.getItem("kloc.session_id")
-        : null;
-    if (stored) {
-      // v2 TODO: a stale id can survive in localStorage past the backend
-      // session being closed (manual close, DB reset, etc.). Probing via
-      // `getSession(stored)` and dropping on 404/closed before reuse is
-      // the right fix; for the PoC we trust the id and surface a "failed
-      // to open session" bootError if the next REST call rejects.
-      setSessionId(stored);
-      return;
-    }
-    createSession()
+    listSessions()
       .then((res) => {
-        if (cancelled) return;
-        setSessionId(res.session_id);
-        window.localStorage.setItem("kloc.session_id", res.session_id);
+        if (!cancelled) setSessions(res.sessions);
       })
-      .catch((err: unknown) => {
+      .catch((e: unknown) => {
         if (!cancelled) {
-          setBootError(err instanceof Error ? err.message : String(err));
+          setError(e instanceof Error ? e.message : String(e));
         }
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [picked]);
 
-  // Shared state — bound to STATE_SNAPSHOT / STATE_DELTA on the AG-UI wire.
-  const { state, setState } = useCoAgent<KlocAgentState>({
-    name: process.env.NEXT_PUBLIC_COPILOTKIT_AGENT_NAME ?? "kloc_agent",
-    initialState: { artifacts: [] },
-  });
-
-  // Once the session is bootstrapped, push the id into shared state so the
-  // agent-proxy route picks it up via `state.session_id` (its resolveSessionId
-  // fallback chain). Without this, the first POST out of CopilotKit lacks the
-  // session_id and the proxy returns 400.
-  useEffect(() => {
-    if (sessionId) {
-      setState((prev) => ({ ...prev, session_id: sessionId }));
+  async function pickExisting(s: SessionListItem) {
+    setBusyId(s.id);
+    try {
+      const page = await listMessages(s.id, { limit: 500 });
+      setPicked({ sessionId: s.id, initialMessages: page.messages });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
     }
-  }, [sessionId, setState]);
+  }
 
-  // Generic generative-UI render for ALL server-tool calls (the PoC ships
-  // one shape; per-tool customisations can layer on later). Name `"*"` is
-  // CopilotKit's wildcard match — every TOOL_CALL_START/ARGS/END/RESULT
-  // from the AG-UI stream lands here. This is also the surface the analyst
-  // sees when `BeforeToolCallEvent` denies a tool (AC19): the
-  // `TOOL_CALL_RESULT` event carries the denial reason, and `result` is
-  // populated with that string in the `complete` status.
-  useCopilotAction({
-    name: "*",
-    render: ({
-      name,
-      args,
-      status,
-      result,
-    }: {
-      name: string;
-      args: Record<string, unknown>;
-      status: string;
-      result?: unknown;
-    }) => (
-      <ToolCallCard
-        name={name}
-        args={args ?? {}}
-        status={status}
-        result={result}
+  async function startNew() {
+    setBusyId("__new__");
+    try {
+      const r = await createSession();
+      setPicked({ sessionId: r.session_id, initialMessages: [] });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (!picked) {
+    return (
+      <SessionPicker
+        sessions={sessions}
+        error={error}
+        busyId={busyId}
+        onPick={pickExisting}
+        onNew={startNew}
       />
-    ),
-  });
+    );
+  }
 
   return (
     <main>
@@ -116,46 +85,42 @@ export default function HomePage() {
         style={{
           padding: "16px 24px",
           borderBottom: "1px solid rgba(120, 120, 120, 0.2)",
+          display: "flex",
+          alignItems: "center",
+          gap: 16,
         }}
       >
-        <h1 style={{ margin: 0, fontSize: 20 }}>kloc-agent</h1>
-        <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>
-          {sessionId
-            ? `session: ${sessionId}`
-            : bootError
-              ? `failed to open session: ${bootError}`
-              : "opening session…"}
-        </p>
+        <button
+          type="button"
+          onClick={() => setPicked(null)}
+          style={{
+            padding: "6px 10px",
+            border: "1px solid rgba(120, 120, 120, 0.35)",
+            borderRadius: 6,
+            background: "transparent",
+            cursor: "pointer",
+            fontSize: 12,
+          }}
+        >
+          ← sessions
+        </button>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 20 }}>kloc-agent</h1>
+          <p style={{ margin: 0, opacity: 0.7, fontSize: 13 }}>
+            session: {picked.sessionId}
+          </p>
+        </div>
       </header>
 
-      <section
-        style={{
-          flex: 1,
-          padding: 24,
-          fontSize: 14,
-          opacity: 0.8,
-          lineHeight: 1.5,
-        }}
+      <CopilotKit
+        runtimeUrl="/api/copilotkit"
+        agent={AGENT_NAME}
+        showDevConsole={false}
+        enableInspector={false}
+        threadId={picked.sessionId}
+        properties={{ session_id: picked.sessionId }}
       >
-        <p>
-          Ask a question about the indexed PHP codebase. The chat sidebar will
-          stream the agent&apos;s reasoning, MCP tool calls, and final answer.
-        </p>
-        {state?.artifacts && state.artifacts.length > 0 && (
-          <ul>
-            {state.artifacts.map((a) => (
-              <li key={a.id}>{a.filename}</li>
-            ))}
-          </ul>
-        )}
-      </section>
-
-      {/* Gate the sidebar on session_id landing in shared state — otherwise
-          CopilotKit can POST to /api/agent-proxy before the useEffect at
-          page.tsx:73-77 mirrors sessionId into useCoAgent state, and the
-          proxy returns 400 "no session_id". The bootstrap usually finishes
-          in < 50ms so the gate is invisible in practice. */}
-      {sessionId !== null && (
+        <AgentBody initialMessages={picked.initialMessages} />
         <CopilotSidebar
           defaultOpen={true}
           clickOutsideToClose={false}
@@ -164,6 +129,119 @@ export default function HomePage() {
             initial: "Ask anything about the indexed PHP codebase.",
           }}
         />
+      </CopilotKit>
+    </main>
+  );
+}
+
+type PickerProps = {
+  sessions: SessionListItem[] | null;
+  error: string | null;
+  busyId: string | null;
+  onPick: (s: SessionListItem) => void;
+  onNew: () => void;
+};
+
+function SessionPicker({
+  sessions,
+  error,
+  busyId,
+  onPick,
+  onNew,
+}: PickerProps) {
+  return (
+    <main style={{ maxWidth: 720, margin: "40px auto", padding: "0 24px" }}>
+      <h1 style={{ marginTop: 0 }}>kloc-agent</h1>
+      <p style={{ opacity: 0.75, fontSize: 14 }}>
+        Resume a previous chat or start a new one.
+      </p>
+
+      <div style={{ marginTop: 20, marginBottom: 24 }}>
+        <button
+          type="button"
+          onClick={onNew}
+          disabled={busyId !== null}
+          style={{
+            padding: "10px 16px",
+            border: "1px solid rgba(120, 120, 120, 0.4)",
+            borderRadius: 8,
+            background: "rgba(80, 130, 220, 0.12)",
+            cursor: busyId !== null ? "wait" : "pointer",
+            fontSize: 14,
+            fontWeight: 600,
+          }}
+        >
+          {busyId === "__new__" ? "Starting…" : "+ Start new chat"}
+        </button>
+      </div>
+
+      {error && (
+        <p style={{ color: "crimson", fontSize: 13 }}>
+          failed to load sessions: {error}
+        </p>
+      )}
+
+      {sessions === null && !error && (
+        <p style={{ opacity: 0.6, fontSize: 13 }}>loading sessions…</p>
+      )}
+
+      {sessions !== null && sessions.length === 0 && (
+        <p style={{ opacity: 0.6, fontSize: 13 }}>
+          No previous sessions. Click <strong>Start new chat</strong> above.
+        </p>
+      )}
+
+      {sessions !== null && sessions.length > 0 && (
+        <ul
+          style={{
+            listStyle: "none",
+            padding: 0,
+            margin: 0,
+            borderTop: "1px solid rgba(120, 120, 120, 0.15)",
+          }}
+        >
+          {sessions.map((s) => (
+            <li
+              key={s.id}
+              style={{
+                borderBottom: "1px solid rgba(120, 120, 120, 0.15)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => onPick(s)}
+                disabled={busyId !== null}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  padding: "12px 4px",
+                  background: "transparent",
+                  border: "none",
+                  textAlign: "left",
+                  cursor: busyId !== null ? "wait" : "pointer",
+                  fontSize: 14,
+                  color: "inherit",
+                }}
+              >
+                <div style={{ fontWeight: 500 }}>
+                  {s.title || "Untitled session"}
+                  {busyId === s.id && (
+                    <span style={{ opacity: 0.6, marginLeft: 8 }}>
+                      loading…
+                    </span>
+                  )}
+                </div>
+                <div style={{ opacity: 0.6, fontSize: 12, marginTop: 2 }}>
+                  {s.message_count} message{s.message_count === 1 ? "" : "s"}
+                  {" · "}
+                  {new Date(s.updated_at).toLocaleString()}
+                  {" · "}
+                  <span style={{ fontFamily: "monospace" }}>{s.id.slice(0, 8)}</span>
+                </div>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </main>
   );

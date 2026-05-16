@@ -31,12 +31,21 @@ from .mcp_clients import build_mcp_clients
 log = logging.getLogger(__name__)
 
 
+MAX_HYDRATION_BYTES = 4 * 1024 * 1024  # 4 MiB cap on hydration JSON.
+
+
 def _read_hydration() -> dict:
     path = os.environ.get(
         "KLOC_HYDRATION_PATH", "/run/kloc/hydration.json"
     )
+    size = os.path.getsize(path)
+    if size > MAX_HYDRATION_BYTES:
+        raise RuntimeError(
+            f"hydration file {path} exceeds {MAX_HYDRATION_BYTES} bytes "
+            f"(actual: {size}); refusing to load"
+        )
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return json.loads(f.read(MAX_HYDRATION_BYTES))
 
 
 async def _run() -> None:
@@ -78,10 +87,19 @@ async def _run() -> None:
     mcp_clients = build_mcp_clients(mcp_endpoints)
 
     try:
-        with contextlib.ExitStack() as stack:
+        async with contextlib.AsyncExitStack() as stack:
             mcp_tools: list[Any] = []
             for client in mcp_clients:
-                stack.enter_context(client)
+                # Strands' MCPClient is a sync context manager (it spawns
+                # an internal thread for the async MCP loop, exposed via
+                # `list_tools_sync()`). AsyncExitStack handles both sync
+                # and async clients via `enter_context` — using
+                # AsyncExitStack rather than ExitStack future-proofs us
+                # if Strands ships a true async MCP client.
+                if hasattr(client, "__aenter__"):
+                    await stack.enter_async_context(client)
+                else:
+                    stack.enter_context(client)
                 mcp_tools.extend(client.list_tools_sync())
 
             strands_agent, audit_provider = build_agent(

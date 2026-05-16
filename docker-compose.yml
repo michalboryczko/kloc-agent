@@ -25,8 +25,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9010:9000"
+      - "9011:9001"
     volumes:
       - minio-data:/data
     networks: [kloc]
@@ -136,7 +136,7 @@ services:
       # and required on Linux engines.
       - "host.docker.internal:host-gateway"
     ports:
-      - "8000:8000"
+      - "8002:8000"
     volumes:
       # Docker-outside-of-Docker (sibling-container pattern). The backend
       # manages per-session runner containers on the host daemon via
@@ -175,11 +175,16 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* is inlined into the client bundle at `next build`
+        # — must be a build ARG, not just runtime env.
+        NEXT_PUBLIC_BACKEND_URL: http://localhost:8002
+        NEXT_PUBLIC_COPILOTKIT_AGENT_NAME: kloc_agent
     ports:
       - "3000:3000"
     environment:
       BACKEND_URL: http://backend:8000
-      NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:8002
       COPILOTKIT_AGENT_NAME: kloc_agent
       NEXT_TELEMETRY_DISABLED: "1"
     networks: [kloc]

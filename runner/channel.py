@@ -122,54 +122,97 @@ class BackendChannel:
 
     async def _stream_outbound(self) -> None:
         """Single chunked POST whose body is a long-lived JSONL stream.
-        Plan §401."""
+        Plan §401.
+
+        Reconnect loop: on any transport-level exception, log + backoff
+        and re-establish the stream. The previous one-shot version
+        permanently silenced this runner on a single transient backend
+        close, surfacing on the backend side as `ClientDisconnect` and
+        causing missing terminal frames downstream.
+        """
         assert self._http is not None
         url = (
             f"{self._backend_url}/internal/sessions/"
             f"{self._session_id}/events"
         )
 
+        # Buffer for in-flight events that arrived after the connection
+        # broke but before we re-established it. Drained at the start
+        # of each new stream attempt.
+        pending_after_break: list[dict] = []
+
         async def body_iter():
+            # Replay anything we held aside while the channel was down.
+            for event in pending_after_break:
+                line = (json.dumps(event) + "\n").encode("utf-8")
+                yield line
+            pending_after_break.clear()
+
             while True:
                 event = await self._outbound.get()
                 if event is None:
                     return
                 line = (json.dumps(event) + "\n").encode("utf-8")
-                # B-DIAG-B: confirm the JSONL frame is leaving the runner
-                # over the chunked POST body. If CHANNEL EMIT lines show
-                # up but no CHANNEL SEND lines, the stream POST is stuck
-                # (handshake failed / backend unreachable / etc.).
                 log.info(
                     "CHANNEL SEND: type=%s bytes=%d",
                     event.get("type", "<unknown>"),
                     len(line),
-                )
+                )  # B-DIAG-B
                 yield line
 
-        log.info("CHANNEL STREAM OPENING -> %s", url)  # B-DIAG-B
-        try:
-            async with self._http.stream(
-                "POST",
-                url,
-                content=body_iter(),
-                headers={
-                    "Content-Type": "application/x-ndjson",
-                    "X-Kloc-Runner-Id": self._runner_id,
-                },
-                timeout=None,
-            ) as response:
-                log.info(
-                    "CHANNEL STREAM OPEN <- %s [status=%d]",
+        backoff = 0.5
+        max_backoff = 10.0
+        sentinel_seen = False
+
+        while not sentinel_seen:
+            log.info("CHANNEL STREAM OPENING -> %s", url)  # B-DIAG-B
+            try:
+                async with self._http.stream(
+                    "POST",
                     url,
-                    response.status_code,
-                )  # B-DIAG-B
-                if response.status_code >= 400:
-                    log.error(
-                        "channel.outbound_bad_status",
-                        extra={"status": response.status_code},
-                    )
-        except Exception:
-            log.exception("channel.outbound_failed")
+                    content=body_iter(),
+                    headers={
+                        "Content-Type": "application/x-ndjson",
+                        "X-Kloc-Runner-Id": self._runner_id,
+                    },
+                    timeout=None,
+                ) as response:
+                    log.info(
+                        "CHANNEL STREAM OPEN <- %s [status=%d]",
+                        url,
+                        response.status_code,
+                    )  # B-DIAG-B
+                    if response.status_code >= 400:
+                        log.error(
+                            "channel.outbound_bad_status",
+                            extra={"status": response.status_code},
+                        )
+                        # 4xx/5xx: don't tight-loop; back off and retry.
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, max_backoff)
+                        continue
+                # Clean exit from the body iterator -> sentinel was seen.
+                sentinel_seen = True
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("channel.outbound_failed; reconnecting")
+                # Drain any events queued while the stream was broken;
+                # the next body_iter will replay them.
+                while True:
+                    try:
+                        event = self._outbound.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if event is None:
+                        sentinel_seen = True
+                        break
+                    pending_after_break.append(event)
+                if sentinel_seen:
+                    return
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
     async def _heartbeat_loop(self) -> None:
         while True:

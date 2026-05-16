@@ -33,7 +33,7 @@ HOOK_DEADLINE_S = 2.0
 
 
 def _sign(body: bytes, ts_ms: int, secret: str) -> str:
-    canonical = f"{ts_ms}.{body.decode('utf-8')}".encode("utf-8")
+    canonical = f"{ts_ms}.".encode("utf-8") + body
     mac = hmac.new(secret.encode("utf-8"), canonical, hashlib.sha256).digest()
     return base64.b64encode(mac).decode("ascii")
 

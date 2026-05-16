@@ -30,7 +30,7 @@ dependencies = [
     "ag_ui_strands==0.1.8",
     "strands_agentskills @ git+https://github.com/aws-samples/sample-strands-agents-agentskills@c5564fcd2e7c249ec57b32027ffbea49e9abeb7b",
     "aiodocker>=0.26",
-    "mcp",
+    "mcp>=1.2,<2",
     # OTel auto-instrumentation (dev-3 batch — Track H)
     # Version-unpinned per OTel auto-instrument convention; pin if uv lock fails.
     "opentelemetry-distro[otlp]",

@@ -300,3 +300,128 @@ async def test_inbox_get_zero_timeout_returns_immediately():
     msg = await registry.inbox_get("s1", timeout_s=0)
     assert msg is None
     await registry.shutdown_all()
+
+
+# --- get_by_runner_id O(1) reverse index --------------------------------
+
+
+async def test_get_by_runner_id_finds_spawned_entry():
+    """Regression: previously O(n) linear scan over `_entries` under
+    `_lock`. Now O(1) via reverse `runner_id -> session_id` index."""
+    runner = SlowFakeRunner()
+    registry = RunnerRegistry(runner=runner, warm_idle_s=60.0)
+    entry = await registry.get_or_spawn("s1", {})
+    found = await registry.get_by_runner_id(entry.handle.runner_id)
+    assert found is entry
+    await registry.shutdown_all()
+
+
+async def test_get_by_runner_id_returns_none_after_eviction():
+    runner = SlowFakeRunner()
+    registry = RunnerRegistry(runner=runner, warm_idle_s=60.0)
+    entry = await registry.get_or_spawn("s1", {})
+    rid = entry.handle.runner_id
+    await registry._remove_entry("s1")
+    assert await registry.get_by_runner_id(rid) is None
+
+
+async def test_shutdown_all_clears_reverse_index():
+    runner = SlowFakeRunner()
+    registry = RunnerRegistry(runner=runner, warm_idle_s=60.0)
+    await registry.get_or_spawn("s1", {})
+    await registry.get_or_spawn("s2", {})
+    await registry.shutdown_all()
+    assert registry._by_runner_id == {}
+
+
+async def test_stale_heartbeat_watcher_does_not_evict_fresh_runner():
+    """Regression: warm-idle eviction must not let the OLD runner's
+    stale HeartbeatWatcher fire `_on_crash` and wipe out a freshly
+    spawned runner under the same session_id.
+
+    Repro: spawn runner A, warm-idle expires (no on_run_finished
+    needed -- we drive it directly), runner A's entry is removed
+    but its heartbeat watcher must also be stopped. Spawn runner B
+    under the same session_id. Drive A's heartbeat watcher to
+    completion synthetically. Registry must still hold runner B's
+    entry, and no `runner_heartbeat_lost` audit row must have been
+    emitted for runner A.
+    """
+    events: list[tuple[str, dict]] = []
+
+    async def audit(kind, payload):
+        events.append((kind, payload))
+
+    runner = SlowFakeRunner()
+    # Heartbeat timeout shorter than the test budget but long enough that
+    # the watcher doesn't trip during the eviction itself.
+    registry = RunnerRegistry(
+        runner=runner,
+        warm_idle_s=0.05,
+        heartbeat_timeout_s=10.0,
+        audit_emit=audit,
+    )
+
+    # First spawn (runner A).
+    entry_a = await registry.get_or_spawn("s-stale", {})
+    rid_a = entry_a.handle.runner_id
+
+    # Trigger warm-idle eviction.
+    entry_a.warm_idle.on_run_finished()
+    await asyncio.sleep(0.15)  # let the kill task run
+
+    # Eviction observed.
+    kinds = [k for k, _ in events]
+    assert "runner_warm_idle_evicted" in kinds
+    assert await registry.get("s-stale") is None
+
+    # Second spawn (runner B) under the SAME session_id.
+    entry_b = await registry.get_or_spawn("s-stale", {})
+    assert entry_b.handle.runner_id != rid_a
+
+    # Now drive runner A's stale watcher's _on_crash callback by hand,
+    # simulating what would happen if `_on_evict` had failed to stop it
+    # and its 30s timeout fired AFTER runner B was already installed.
+    # With the fix, this must NOT remove runner B's entry, and must NOT
+    # emit `runner_heartbeat_lost`.
+    stale_on_crash = entry_a.heartbeat._on_crash  # type: ignore[attr-defined]
+    assert stale_on_crash is not None
+    await stale_on_crash()
+
+    # Runner B must still be in the registry.
+    still_b = await registry.get("s-stale")
+    assert still_b is entry_b, (
+        "stale watcher from evicted runner A must not evict fresh runner B"
+    )
+    # No spurious heartbeat-lost.
+    assert "runner_heartbeat_lost" not in [k for k, _ in events], (
+        f"stale _on_crash must be a no-op; got events={events}"
+    )
+
+    await registry.shutdown_all()
+
+
+async def test_warm_idle_eviction_stops_heartbeat_watcher():
+    """The HeartbeatWatcher of the evicted runner must be stopped as
+    part of warm-idle eviction so it doesn't keep looping (and
+    eventually firing `_on_crash`) against an already-terminated
+    handle."""
+    runner = SlowFakeRunner()
+    registry = RunnerRegistry(
+        runner=runner,
+        warm_idle_s=0.05,
+        heartbeat_timeout_s=10.0,
+    )
+    entry = await registry.get_or_spawn("s-hb-stop", {})
+    hb = entry.heartbeat
+    entry.warm_idle.on_run_finished()
+    await asyncio.sleep(0.15)
+
+    # Watcher task must have exited.
+    assert hb._stopped is True, "heartbeat watcher must be stopped on eviction"
+    task = hb._task
+    assert task is None or task.done(), (
+        "heartbeat watcher task must be done after eviction"
+    )
+
+    await registry.shutdown_all()

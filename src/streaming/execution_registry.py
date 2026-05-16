@@ -61,7 +61,11 @@ class Execution:
     def is_evictable(self) -> bool:
         if self.status == "running":
             return False
-        assert self.finished_ts is not None
+        if self.finished_ts is None:
+            raise RuntimeError(
+                "Execution.is_evictable invariant violated: status is "
+                f"{self.status!r} but finished_ts is None"
+            )
         return (time.monotonic() - self.finished_ts) > _TTL_AFTER_DONE_S
 
 

@@ -116,18 +116,18 @@ def build_agent(
             "disclosure may be limited"
         )
 
-    model_id = (
-        getattr(payload, "model_id", None) or payload.get("model_id", "")
-    )
-    llm_provider = (
-        getattr(payload, "llm_provider", None) or payload.get("llm_provider")
-    )
-    base_prompt = (
-        getattr(payload, "system_prompt", None) or payload.get("system_prompt", "")
-    )
-    skills_dir = Path(
-        getattr(payload, "skills_dir", None) or payload.get("skills_dir", "/skills")
-    )
+    def _field(name: str, default: Any = None) -> Any:
+        # Pydantic models have no `.get()`; only attribute access works.
+        # Plain dicts use `.get()`. Read both safely without conflating.
+        v = getattr(payload, name, None)
+        if v is None and isinstance(payload, dict):
+            v = payload.get(name, default)
+        return v if v is not None else default
+
+    model_id = _field("model_id", "") or ""
+    llm_provider = _field("llm_provider")
+    base_prompt = _field("system_prompt", "") or ""
+    skills_dir = Path(_field("skills_dir", "/skills") or "/skills")
 
     model = create_model(model_id=model_id, llm_provider=llm_provider)
     skills_prompt = _load_skills_prompt(skills_dir)

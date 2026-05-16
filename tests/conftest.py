@@ -57,13 +57,17 @@ def anthropic_api_key() -> str:
 
 @pytest.fixture(scope="session")
 def kloc_intelligence_path() -> Path:
-    """Path to the local checkout of kloc-intelligence (MCP server source)."""
-    p = Path(
-        os.environ.get(
-            "KLOC_INTELLIGENCE_PATH",
-            "/Users/michal/dev/ai/kloc/kloc-intelligence/",
+    """Path to the local checkout of kloc-intelligence (MCP server source).
+
+    Set `KLOC_INTELLIGENCE_PATH` to override; tests skip when unset to
+    avoid being tied to one developer's filesystem layout."""
+    raw = os.environ.get("KLOC_INTELLIGENCE_PATH")
+    if not raw:
+        pytest.skip(
+            "KLOC_INTELLIGENCE_PATH unset — point it at a local "
+            "kloc-intelligence checkout to run this test"
         )
-    )
+    p = Path(raw)
     if not p.is_dir():
         pytest.skip(f"kloc-intelligence not found at {p}")
     return p
@@ -73,19 +77,19 @@ def kloc_intelligence_path() -> Path:
 def sot_json_fixture() -> Path:
     """Small sot.json fixture for the MCP to load.
 
-    C1 resolution: default to `/Users/michal/dev/ai/kloc/data/reference-fresh/sot.json`
-    (~890KB reference-project graph). `data/uestate/sot.json` named in the
-    brief does not exist locally.
+    Set `SOT_JSON_FIXTURE` to a generated sot.json. Tests skip when
+    unset rather than depending on developer-machine layouts.
     """
-    candidates = [
-        Path(os.environ.get("SOT_JSON_FIXTURE", "")),
-        Path("/Users/michal/dev/ai/kloc/data/reference-fresh/sot.json"),
-        Path("/Users/michal/dev/ai/kloc/data/uestate/sot.json"),
-    ]
-    for c in candidates:
-        if c.parts and c.is_file():
-            return c
-    pytest.skip("No sot.json fixture found — set SOT_JSON_FIXTURE env var")
+    raw = os.environ.get("SOT_JSON_FIXTURE")
+    if not raw:
+        pytest.skip(
+            "SOT_JSON_FIXTURE unset — point it at a generated sot.json "
+            "to run tests that need a code-graph fixture"
+        )
+    p = Path(raw)
+    if not p.is_file():
+        pytest.skip(f"sot.json not found at {p}")
+    return p
 
 
 @pytest.fixture(scope="session")

@@ -83,3 +83,45 @@ def test_garbage_signature_does_not_raise() -> None:
     ts = int(time.time() * 1000)
     assert verify_hmac_signature(body, ts, "@@@not-base64@@@", SECRET) is False
     assert verify_hmac_signature(body, ts, "", SECRET) is False
+
+
+# ---------------------------------------------------------------------------
+# Runner ↔ backend signing-input parity (Critical fix from
+# docs/reviews/unmapped-findings.md).
+#
+# Previously `runner/hooks/audit.py:_sign` built the canonical input as
+# `f"{ts}.{body.decode('utf-8')}".encode()` while the verifier in this
+# module concatenates raw bytes via `f"{ts}.".encode() + body`. The two
+# diverge on non-ASCII utf-8 JSON, causing every BeforeToolCall to fail
+# HMAC and silently block tool execution.
+# ---------------------------------------------------------------------------
+
+
+def test_runner_sign_matches_backend_sign_for_ascii_body() -> None:
+    from runner.hooks.audit import _sign as runner_sign
+
+    body = b'{"event":"BeforeToolCall","tool":"kloc.search"}'
+    ts = 1_700_000_000_000
+    assert runner_sign(body, ts, SECRET) == sign_for_test(body, ts, SECRET)
+
+
+def test_runner_sign_matches_backend_sign_for_unicode_body() -> None:
+    """Regression pin: non-ASCII bytes survive the runner→backend HMAC
+    round-trip. The byte-concat form is the only one that works for
+    arbitrary utf-8 JSON payloads."""
+    import json
+
+    from runner.hooks.audit import _sign as runner_sign
+
+    body = json.dumps({"tool": "поиск", "args": {"q": "тест"}}).encode("utf-8")
+    ts = 1_700_000_000_000
+    assert runner_sign(body, ts, SECRET) == sign_for_test(body, ts, SECRET)
+
+
+def test_runner_signed_body_verifies_with_backend_verifier() -> None:
+    from runner.hooks.audit import _sign as runner_sign
+
+    body = b'{"x":1}'
+    ts = int(time.time() * 1000)
+    sig = runner_sign(body, ts, SECRET)
+    assert verify_hmac_signature(body, ts, sig, SECRET, now_ms=ts) is True

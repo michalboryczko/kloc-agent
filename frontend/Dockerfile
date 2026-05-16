@@ -18,6 +18,12 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-f
 FROM node:22-alpine AS build
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# NEXT_PUBLIC_* must be present at build time — Next.js inlines them
+# into the client bundle. Runtime env on the `run` stage is too late.
+ARG NEXT_PUBLIC_BACKEND_URL
+ENV NEXT_PUBLIC_BACKEND_URL=${NEXT_PUBLIC_BACKEND_URL}
+ARG NEXT_PUBLIC_COPILOTKIT_AGENT_NAME
+ENV NEXT_PUBLIC_COPILOTKIT_AGENT_NAME=${NEXT_PUBLIC_COPILOTKIT_AGENT_NAME}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

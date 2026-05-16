@@ -73,7 +73,17 @@ async def orphan_sweep(
             try:
                 await container.stop(t=5)
             except Exception:
-                pass
+                # Container may already be exited / removed concurrently;
+                # we still attempt delete below. Log so a real Docker
+                # daemon problem doesn't get swallowed silently.
+                log.warning(
+                    "orphan_sweep.stop_failed",
+                    extra={
+                        "runner_id": runner_id,
+                        "container_id": container.id,
+                    },
+                    exc_info=True,
+                )
             try:
                 await container.delete(force=True)
                 swept += 1

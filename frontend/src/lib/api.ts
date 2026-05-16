@@ -21,6 +21,20 @@ export type SessionSummary = {
   last_activity_at?: string;
 };
 
+export type SessionListItem = {
+  id: string;
+  title: string;
+  runner_state: string;
+  message_count: number;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+};
+
+export type SessionList = {
+  sessions: SessionListItem[];
+};
+
 export type Message = {
   id: string;
   seq: number;
@@ -51,6 +65,15 @@ export async function createSession(): Promise<SessionCreateResponse> {
     body: JSON.stringify({}),
   });
   return jsonOrThrow<SessionCreateResponse>(res);
+}
+
+export async function listSessions(
+  options: { includeClosed?: boolean } = {},
+): Promise<SessionList> {
+  const url = new URL(`/v1/sessions`, BROWSER_BACKEND_URL);
+  if (options.includeClosed) url.searchParams.set("include_closed", "true");
+  const res = await fetch(url.toString());
+  return jsonOrThrow<SessionList>(res);
 }
 
 export async function getSession(id: string): Promise<SessionSummary> {

@@ -62,13 +62,17 @@ class TextDeltaDebouncer:
                 )
 
     async def on_end(self, message_id: str) -> None:
-        buf = self._buffers.pop(message_id, None)
+        buf = self._buffers.get(message_id)
         if buf is None:
             await self._finalize(message_id)
             return
+        # Cancel the timer BEFORE removing the buffer entry — otherwise
+        # `_flush_after_interval` can fire between pop and cancel and
+        # see `self._buffers[message_id]` as None mid-flight.
         async with buf.lock:
             if buf.flush_task is not None and not buf.flush_task.done():
                 buf.flush_task.cancel()
+            self._buffers.pop(message_id, None)
             if buf.buffer:
                 await self._flush_locked(message_id, buf)
         await self._finalize(message_id)
@@ -80,6 +84,9 @@ class TextDeltaDebouncer:
             return
         buf = self._buffers.get(message_id)
         if buf is None:
+            # `on_end` already drained + removed this buffer. Nothing
+            # to flush; exit cleanly. Guard explicitly so a stale timer
+            # firing after pop never raises.
             return
         async with buf.lock:
             if buf.buffer:

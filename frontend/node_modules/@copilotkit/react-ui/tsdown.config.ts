@@ -11,8 +11,8 @@ export default defineConfig([
     external: [
       "react",
       "react-dom",
-      "@copilotkitnext/core",
-      "@copilotkitnext/react",
+      "@copilotkit/core",
+      "@copilotkit/react-core/v2",
     ],
     exports: {
       customExports: (exports) => ({

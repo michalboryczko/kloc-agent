@@ -10,6 +10,7 @@ requires a Pydantic `BaseEvent` — we coerce dict → typed event via the
 
 from __future__ import annotations
 
+import logging
 from typing import AsyncIterator, Union
 
 from fastapi import Request
@@ -18,14 +19,17 @@ from fastapi.responses import StreamingResponse
 try:
     from ag_ui.encoder import EventEncoder  # type: ignore
     from ag_ui.core.events import BaseEvent, Event  # type: ignore
-    from pydantic import TypeAdapter  # type: ignore
+    from pydantic import TypeAdapter, ValidationError  # type: ignore
 
     _EVENT_ADAPTER: TypeAdapter = TypeAdapter(Event)
 except ImportError:
     EventEncoder = None  # type: ignore
     BaseEvent = None  # type: ignore
     _EVENT_ADAPTER = None  # type: ignore
+    ValidationError = Exception  # type: ignore
 
+
+log = logging.getLogger(__name__)
 
 KEEPALIVE_LINE = ": keepalive\n\n"
 
@@ -44,9 +48,21 @@ def make_response(
     async def stream() -> AsyncIterator[bytes]:
         async for event in generator:
             # Bus delivers plain dicts; AG-UI's encoder requires a typed
-            # BaseEvent. Discriminated-union validation by `type` field.
+            # BaseEvent. Validate-or-skip — an unknown tag (`runner_ready`,
+            # `heartbeat`, future runner-internal frames that aren't part
+            # of the AG-UI public protocol) used to crash the whole
+            # StreamingResponse before a single byte was yielded. Now they
+            # are logged and dropped so well-formed AG-UI frames still get
+            # through to the client.
             if isinstance(event, dict):
-                event = _EVENT_ADAPTER.validate_python(event)
+                try:
+                    event = _EVENT_ADAPTER.validate_python(event)
+                except ValidationError:
+                    log.warning(
+                        "sse.skip_unknown_event type=%r",
+                        event.get("type") if isinstance(event, dict) else None,
+                    )
+                    continue
             yield encoder.encode(event).encode("utf-8")
 
     return StreamingResponse(stream(), media_type=encoder.get_content_type())

@@ -26,6 +26,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
+from starlette.requests import ClientDisconnect
 
 
 router = APIRouter(tags=["internal"])
@@ -105,20 +106,57 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
     active_by_session: dict[str, str] | None = getattr(
         request.app.state, "active_run_by_session", None
     )
+    # Pre-RUN_STARTED buffer: under resume / reconnect, replay frames
+    # may arrive before the cached `RUN_STARTED` lands (or before the
+    # backend re-establishes the run id). Holding them aside until we
+    # see RUN_STARTED prevents a silent drop.
+    pending_by_session: dict[str, list[dict]] | None = getattr(
+        request.app.state, "pending_pre_run_started", None
+    )
     if run_id:
         if frame_type == "RUN_STARTED" and active_by_session is not None:
             active_by_session[session_id] = str(run_id)
+            # Flush any frames buffered before this RUN_STARTED — they
+            # belong to this run.
+            if pending_by_session is not None:
+                pending = pending_by_session.pop(session_id, None)
+                if pending and bus is not None:
+                    for buf in pending:
+                        await bus.publish(session_id, str(run_id), buf)
+                    _diag(
+                        f"B-DIAG-EVENTS EVENTS REPLAY FLUSH: "
+                        f"session_id={session_id} count={len(pending)} "
+                        f"run_id={run_id}"
+                    )
     elif active_by_session is not None:
         run_id = active_by_session.get(session_id)
 
     if not run_id:
         # Genuine orphan: a non-lifecycle frame arrived before any
-        # RUN_STARTED was seen for this session.
-        _diag(
-            f"B-DIAG-EVENTS EVENTS ORPHAN (no active run): "
-            f"type={frame_type} session_id={session_id} "
-            f"frame_keys={list(frame.keys())}"
-        )
+        # RUN_STARTED was seen for this session. Buffer it instead of
+        # silent drop so the resume / replay path doesn't lose state.
+        if pending_by_session is not None:
+            buf = pending_by_session.setdefault(session_id, [])
+            # Bound the buffer so a misbehaving runner can't OOM us.
+            if len(buf) < _PRE_RUN_BUFFER_CAP:
+                buf.append(frame)
+                _diag(
+                    f"B-DIAG-EVENTS EVENTS BUFFERED (no active run): "
+                    f"type={frame_type} session_id={session_id} "
+                    f"buffered={len(buf)}"
+                )
+            else:
+                _diag(
+                    f"B-DIAG-EVENTS EVENTS DROPPED (buffer full): "
+                    f"type={frame_type} session_id={session_id} "
+                    f"cap={_PRE_RUN_BUFFER_CAP}"
+                )
+        else:
+            _diag(
+                f"B-DIAG-EVENTS EVENTS ORPHAN (no active run): "
+                f"type={frame_type} session_id={session_id} "
+                f"frame_keys={list(frame.keys())}"
+            )
         return
 
     await bus.publish(session_id, str(run_id), frame)
@@ -141,6 +179,11 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
 # AG-UI events; anything larger is almost certainly a runaway/attack.
 MAX_LINE_BYTES = 1 * 1024 * 1024
 
+# Cap on frames buffered per-session before RUN_STARTED is observed.
+# Bounded so a misbehaving runner that never emits RUN_STARTED cannot
+# OOM the backend.
+_PRE_RUN_BUFFER_CAP = 1024
+
 
 @router.post(
     "/sessions/{session_id}/events",
@@ -162,68 +205,82 @@ async def ingest_runner_events(
     chunk_count = 0
     buf = b""
     _diag(f"B-DIAG-EVENTS EVENTS RX OPEN: session_id={sid}")
-    async for chunk in request.stream():
-        buf += chunk
-        total_bytes += len(chunk)
-        chunk_count += 1
-        if chunk_count <= 3 or chunk_count % 10 == 0:
-            # Sampled chunk-level diag (avoid log spam on long-lived
-            # streams). First three chunks always logged; afterwards
-            # every 10th. Helps confirm bytes are flowing even when no
-            # newline appears for a while.
-            _diag(
-                f"B-DIAG-EVENTS EVENTS RX CHUNK: session_id={sid} "
-                f"chunk_n={chunk_count} chunk_bytes={len(chunk)} "
-                f"buf_bytes={len(buf)} total_bytes={total_bytes}"
-            )
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            line = line.strip()
-            if not line:
-                continue
-            if len(line) > MAX_LINE_BYTES:
+    try:
+        async for chunk in request.stream():
+            buf += chunk
+            total_bytes += len(chunk)
+            chunk_count += 1
+            if chunk_count <= 3 or chunk_count % 10 == 0:
+                # Sampled chunk-level diag (avoid log spam on long-lived
+                # streams). First three chunks always logged; afterwards
+                # every 10th. Helps confirm bytes are flowing even when no
+                # newline appears for a while.
+                _diag(
+                    f"B-DIAG-EVENTS EVENTS RX CHUNK: session_id={sid} "
+                    f"chunk_n={chunk_count} chunk_bytes={len(chunk)} "
+                    f"buf_bytes={len(buf)} total_bytes={total_bytes}"
+                )
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                if len(line) > MAX_LINE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"JSONL frame exceeds {MAX_LINE_BYTES} bytes",
+                    )
+                try:
+                    frame = json.loads(line)
+                except json.JSONDecodeError as e:
+                    _diag(
+                        f"B-DIAG-EVENTS EVENTS PARSE FAIL: "
+                        f"line={line[:200]!r} err={e}"
+                    )
+                    raise HTTPException(
+                        status_code=400, detail="invalid JSONL frame"
+                    )
+                count += 1
+                await _dispatch_frame(request, sid, frame)
+            if len(buf) > MAX_LINE_BYTES:
+                # Pending line (no newline yet) already over cap — fail fast
+                # so we don't accumulate bytes indefinitely.
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"JSONL frame exceeds {MAX_LINE_BYTES} bytes",
+                )
+
+        # Final flush — handle a trailing line without a newline.
+        buf = buf.strip()
+        if buf:
+            if len(buf) > MAX_LINE_BYTES:
                 raise HTTPException(
                     status_code=413,
                     detail=f"JSONL frame exceeds {MAX_LINE_BYTES} bytes",
                 )
             try:
-                frame = json.loads(line)
+                frame = json.loads(buf)
             except json.JSONDecodeError as e:
                 _diag(
-                    f"B-DIAG-EVENTS EVENTS PARSE FAIL: "
-                    f"line={line[:200]!r} err={e}"
+                    f"B-DIAG-EVENTS EVENTS PARSE FAIL (final): "
+                    f"line={buf[:200]!r} err={e}"
                 )
-                raise HTTPException(
-                    status_code=400, detail="invalid JSONL frame"
-                )
+                raise HTTPException(status_code=400, detail="invalid JSONL frame")
             count += 1
             await _dispatch_frame(request, sid, frame)
-        if len(buf) > MAX_LINE_BYTES:
-            # Pending line (no newline yet) already over cap — fail fast
-            # so we don't accumulate bytes indefinitely.
-            raise HTTPException(
-                status_code=413,
-                detail=f"JSONL frame exceeds {MAX_LINE_BYTES} bytes",
-            )
-
-    # Final flush — handle a trailing line without a newline.
-    buf = buf.strip()
-    if buf:
-        if len(buf) > MAX_LINE_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"JSONL frame exceeds {MAX_LINE_BYTES} bytes",
-            )
-        try:
-            frame = json.loads(buf)
-        except json.JSONDecodeError as e:
-            _diag(
-                f"B-DIAG-EVENTS EVENTS PARSE FAIL (final): "
-                f"line={buf[:200]!r} err={e}"
-            )
-            raise HTTPException(status_code=400, detail="invalid JSONL frame")
-        count += 1
-        await _dispatch_frame(request, sid, frame)
+    except ClientDisconnect:
+        # The runner closed its end mid-stream. With the runner-side
+        # reconnect loop in `runner/channel.py` this is no longer fatal:
+        # whatever frames already landed are dispatched; the runner will
+        # reopen the channel and resume. Log at info, not exception.
+        _diag(
+            f"B-DIAG-EVENTS EVENTS RX DISCONNECT: session_id={sid} "
+            f"bytes={total_bytes} chunks={chunk_count} frames={count}"
+        )
+        return JSONResponse(
+            content={"received": count, "disconnected": True},
+            status_code=status.HTTP_202_ACCEPTED,
+        )
 
     _diag(
         f"B-DIAG-EVENTS EVENTS RX CLOSE: session_id={sid} "

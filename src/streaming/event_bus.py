@@ -8,8 +8,11 @@ overlapping connections during cursor-replay handoff)."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from typing import AsyncIterator
+
+log = logging.getLogger(__name__)
 
 
 class EventBus:
@@ -20,27 +23,77 @@ class EventBus:
     async def publish(self, session_id: str, run_id: str, event: dict) -> None:
         async with self._lock:
             queues = list(self._subs.get((session_id, run_id), ()))
+        full: list[asyncio.Queue[dict]] = []
         for q in queues:
-            q.put_nowait(event)
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                full.append(q)
+        if not full:
+            return
+        # A subscriber's queue is saturated -- almost always a slow SSE
+        # client. Drop it with a sentinel so the SSE generator exits
+        # cleanly rather than silently losing the event (which previously
+        # caused missing RUN_FINISHED frames under load).
+        log.warning(
+            "event_bus.queue_full session=%s run=%s slow_subscribers=%d",
+            session_id,
+            run_id,
+            len(full),
+        )
+        for q in full:
+            try:
+                q.put_nowait(_SENTINEL)
+            except asyncio.QueueFull:
+                pass
+        async with self._lock:
+            bucket = self._subs.get((session_id, run_id))
+            if bucket is not None:
+                for q in full:
+                    bucket.discard(q)
+                if not bucket:
+                    self._subs.pop((session_id, run_id), None)
 
-    async def subscribe(
+    async def register(
         self, session_id: str, run_id: str
-    ) -> AsyncIterator[dict]:
+    ) -> asyncio.Queue[dict]:
+        """Create + register a queue for `(session_id, run_id)` WITHOUT
+        starting to consume. Use this to close the subscribe-after-publish
+        race: register the queue first, then trigger the producer, then
+        iterate via `consume`. Returns the queue to pass to `consume`."""
         q: asyncio.Queue[dict] = asyncio.Queue(maxsize=10_000)
         key = (session_id, run_id)
         async with self._lock:
             self._subs[key].add(q)
+        return q
+
+    async def consume(
+        self, session_id: str, run_id: str, queue: asyncio.Queue[dict]
+    ) -> AsyncIterator[dict]:
+        """Yield events from a queue previously returned by `register`,
+        stopping on the sentinel. Cleans up `_subs` in `finally` exactly
+        like `subscribe` does."""
+        key = (session_id, run_id)
         try:
             while True:
-                event = await q.get()
+                event = await queue.get()
                 if event is _SENTINEL:
                     return
                 yield event
         finally:
             async with self._lock:
-                self._subs[key].discard(q)
-                if not self._subs[key]:
-                    self._subs.pop(key, None)
+                bucket = self._subs.get(key)
+                if bucket is not None:
+                    bucket.discard(queue)
+                    if not bucket:
+                        self._subs.pop(key, None)
+
+    async def subscribe(
+        self, session_id: str, run_id: str
+    ) -> AsyncIterator[dict]:
+        q = await self.register(session_id, run_id)
+        async for event in self.consume(session_id, run_id, q):
+            yield event
 
     async def close(self, session_id: str, run_id: str) -> None:
         async with self._lock:

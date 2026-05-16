@@ -72,7 +72,19 @@ class RunnerRegistry:
         self._heartbeat_timeout_s = heartbeat_timeout_s
         self._audit_emit = audit_emit
         self._entries: dict[str, RegistryEntry] = {}
+        # Reverse index `runner_id -> session_id`. Maintained in
+        # `_install_entry` and `_remove_entry` so `get_by_runner_id`
+        # is O(1). Without this every inbound webhook hot-path call
+        # serialized on a full registry scan under `_lock`.
+        self._by_runner_id: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        # Per-session spawn locks: serialize concurrent `get_or_spawn`
+        # callers for the same session_id so we never end up with two
+        # runner containers for one session. `_lock` guards only the
+        # registry-map invariants -- it can't cover the spawn body
+        # because the kill task's `_on_evict` callback re-acquires it
+        # (would deadlock; see Concurrency model above).
+        self._spawn_locks: dict[str, asyncio.Lock] = {}
 
     def set_runner(
         self,
@@ -112,6 +124,8 @@ class RunnerRegistry:
         async with self._lock:
             entries = list(self._entries.items())
             self._entries.clear()
+            self._by_runner_id.clear()
+            self._spawn_locks.clear()
         for session_id, entry in entries:
             await entry.heartbeat.stop()
             await entry.warm_idle.shutdown()
@@ -124,15 +138,65 @@ class RunnerRegistry:
                         extra={"session_id": session_id},
                     )
 
-    async def _remove_entry(self, session_id: str) -> RegistryEntry | None:
+    async def _remove_entry(
+        self,
+        session_id: str,
+        *,
+        expected_runner_id: str | None = None,
+    ) -> RegistryEntry | None:
         """Lock-scoped helper. Used by `_on_evict` / `_on_crash` and by
-        get_or_spawn's "container died" branch."""
+        get_or_spawn's "container died" branch.
+
+        When `expected_runner_id` is provided, the removal only fires if
+        the currently installed entry's handle matches that runner_id.
+        This guards against a stale callback (e.g. a HeartbeatWatcher
+        belonging to an already-evicted runner) racing in *after* a
+        fresh runner has been installed under the same session_id and
+        wiping the new entry out from under us. Without this check the
+        first heartbeat-frame from the fresh runner finds an empty
+        registry slot, no inbox delivery happens, and the SSE client
+        gets an empty 200.
+        """
         async with self._lock:
-            return self._entries.pop(session_id, None)
+            current = self._entries.get(session_id)
+            if (
+                current is not None
+                and expected_runner_id is not None
+                and getattr(current.handle, "runner_id", None)
+                != expected_runner_id
+            ):
+                # Stale caller: a fresh entry has replaced the one this
+                # callback was bound to. Leave the new entry alone.
+                return None
+            entry = self._entries.pop(session_id, None)
+            if entry is not None:
+                rid = getattr(entry.handle, "runner_id", None)
+                if rid is not None:
+                    self._by_runner_id.pop(rid, None)
+            # Drop the per-session spawn lock to keep `_spawn_locks`
+            # bounded. Safe under `_lock` because we never hold the
+            # spawn lock here -- only the next `get_or_spawn` would
+            # acquire it, and that's the moment a fresh lock should
+            # be created anyway.
+            self._spawn_locks.pop(session_id, None)
+            return entry
 
     async def _get_entry(self, session_id: str) -> RegistryEntry | None:
         async with self._lock:
             return self._entries.get(session_id)
+
+    async def _get_spawn_lock(self, session_id: str) -> asyncio.Lock:
+        """Create-on-miss accessor for the per-session spawn lock.
+        Guarded by `_lock` only for the dict mutation itself -- the
+        returned lock is then acquired OUTSIDE of `_lock` by the
+        caller (`get_or_spawn`) so we don't widen `_lock` over the
+        spawn body."""
+        async with self._lock:
+            lock = self._spawn_locks.get(session_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._spawn_locks[session_id] = lock
+            return lock
 
     async def get_or_spawn(
         self, session_id: str, hydration_payload: Any
@@ -161,9 +225,24 @@ class RunnerRegistry:
             if entry is not None:
                 await self._remove_entry(session_id)
 
-        # No live container — spawn fresh.
-        handle = await self._runner.spawn(hydration_payload)
-        new_entry = await self._install_entry(session_id, handle)
+        # No live container — spawn fresh. Serialize concurrent
+        # spawners for this session_id via a per-session spawn lock so
+        # only one container is created when N callers race here at
+        # once. We acquire this lock OUTSIDE `_lock` to preserve the
+        # deadlock-avoidance invariant documented above (kill task's
+        # `_on_evict` callback re-acquires `_lock`).
+        spawn_lock = await self._get_spawn_lock(session_id)
+        async with spawn_lock:
+            # Double-check: a concurrent caller may have already
+            # installed a live entry while we waited for the lock.
+            existing = await self._get_entry(session_id)
+            if existing is not None and await self._runner.is_alive(
+                existing.handle
+            ):
+                return existing
+
+            handle = await self._runner.spawn(hydration_payload)
+            new_entry = await self._install_entry(session_id, handle)
 
         if self._audit_emit:
             await self._audit_emit(
@@ -185,7 +264,24 @@ class RunnerRegistry:
         entry_ref: dict[str, RegistryEntry] = {}
 
         async def _on_evict() -> None:
-            await self._remove_entry(session_id)
+            # Stop the heartbeat watcher BEFORE removing the registry
+            # entry. Otherwise the stale watcher keeps looping on the
+            # already-terminated handle and, ~30s later, fires _on_crash
+            # which would wipe out whichever entry currently occupies
+            # `session_id` -- including a brand-new runner that arrived
+            # after the eviction. (The `expected_runner_id` guard in
+            # `_remove_entry` is the belt; this stop() is the braces.)
+            try:
+                await heartbeat.stop()
+            except Exception:
+                log.exception(
+                    "registry.on_evict_heartbeat_stop_failed",
+                    extra={"session_id": session_id},
+                )
+            await self._remove_entry(
+                session_id,
+                expected_runner_id=getattr(handle, "runner_id", None),
+            )
             if self._audit_emit:
                 await self._audit_emit(
                     "runner_warm_idle_evicted",
@@ -200,7 +296,16 @@ class RunnerRegistry:
             in_flight: dict[str, str] = (
                 dict(entry.in_flight_tool_calls) if entry is not None else {}
             )
-            await self._remove_entry(session_id)
+            removed = await self._remove_entry(
+                session_id,
+                expected_runner_id=getattr(handle, "runner_id", None),
+            )
+            if removed is None:
+                # Stale watcher (its runner has already been replaced
+                # in the registry by a fresh spawn). Do not emit a
+                # spurious `runner_heartbeat_lost` for a runner that
+                # already exited cleanly via warm-idle eviction.
+                return
             if self._audit_emit:
                 await self._audit_emit(
                     "runner_heartbeat_lost",
@@ -247,20 +352,24 @@ class RunnerRegistry:
 
         async with self._lock:
             self._entries[session_id] = entry
+            rid = getattr(handle, "runner_id", None)
+            if rid is not None:
+                self._by_runner_id[rid] = session_id
         return entry
 
     async def get(self, session_id: str) -> RegistryEntry | None:
         return await self._get_entry(session_id)
 
     async def get_by_runner_id(self, runner_id: str) -> RegistryEntry | None:
-        """Used by `src/api/internal.py` to authenticate inbound JSONL
-        events: the runner identifies itself in the URL, the backend
-        looks up the session it belongs to."""
+        """O(1) reverse lookup via the `runner_id -> session_id` index
+        maintained in `_install_entry` / `_remove_entry`. Used by
+        `src/api/webhooks.py` to look up the per-runner HMAC secret on
+        every inbound webhook -- O(n) here was a per-event hot-path."""
         async with self._lock:
-            for entry in self._entries.values():
-                if getattr(entry.handle, "runner_id", None) == runner_id:
-                    return entry
-            return None
+            sid = self._by_runner_id.get(runner_id)
+            if sid is None:
+                return None
+            return self._entries.get(sid)
 
     async def inbox_get(
         self, session_id: str, timeout_s: float

@@ -6,9 +6,10 @@ at startup rather than first request.
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +35,15 @@ class Settings(BaseSettings):
     minio_use_ssl: bool = False
     artifact_bucket: str = "kloc-agent-artifacts-dev"
 
+    stub_mode: bool = Field(
+        default=False,
+        validation_alias="KLOC_STUB_MODE",
+        description=(
+            "When true, skip boot-time provider-key validation. Tests run "
+            "with this true; production with this false."
+        ),
+    )
+
     runner_warm_idle_s: int = 60
     runner_heartbeat_timeout_s: int = 30
     runner_image_tag: str = "kloc-agent-runner:dev"
@@ -55,8 +65,8 @@ class Settings(BaseSettings):
     )
 
     llm_provider: LlmProvider = "gemini"
-    anthropic_api_key: str = ""
-    gemini_api_key: str = ""
+    anthropic_api_key: str | None = None
+    gemini_api_key: str | None = None
 
     backend_url: str = "http://localhost:8000"
 
@@ -89,12 +99,63 @@ class Settings(BaseSettings):
     def deny_tools_set(self) -> set[str]:
         return {t.strip() for t in self.kloc_deny_tools.split(",") if t.strip()}
 
+    cors_allow_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000"],
+        validation_alias="KLOC_CORS_ALLOW_ORIGINS",
+        description=(
+            "Origins allowed for browser CORS requests against the FastAPI "
+            "backend. Accepts a comma-separated string from env "
+            "(`KLOC_CORS_ALLOW_ORIGINS=http://a,http://b`) or a Python list "
+            "in code/tests. Used by `fastapi.middleware.cors.CORSMiddleware` "
+            "installed in `src/main.create_app`."
+        ),
+    )
 
-_settings: Settings | None = None
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def _split_cors_allow_origins(cls, v: object) -> object:
+        # Pydantic-settings hands us a raw string when the env var is set;
+        # split on comma and strip empties so `KLOC_CORS_ALLOW_ORIGINS=
+        # "http://localhost:3000, http://localhost:3001"` resolves to a
+        # two-element list. A list (default / in-code construction) flows
+        # through unchanged.
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
+
+    allow_hmac_fallback: bool = Field(
+        default=False,
+        description=(
+            "When True, the HMAC webhook receiver accepts the bootstrap "
+            "secret (`kloc_hook_secret`) for runner_ids that have no entry "
+            "in the runner registry. Intended for unit tests / stub mode. "
+            "Default False (strict): unknown runner_ids fail with 401 even "
+            "if the body is signed with the global bootstrap secret. "
+            "Read from env var `ALLOW_HMAC_FALLBACK` (case-insensitive)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_provider_key(self) -> "Settings":
+        # Validate at boot, not first LLM call. Empty string was accepted
+        # silently before — now we require the key for the configured provider.
+        # Allow missing in stub mode (tests / CI) — checked at runtime.
+        if self.stub_mode:
+            return self
+        if self.llm_provider == "anthropic" and not self.anthropic_api_key:
+            raise ValueError(
+                "ANTHROPIC_API_KEY required when llm_provider=anthropic "
+                "(or set KLOC_STUB_MODE=true)"
+            )
+        if self.llm_provider == "gemini" and not self.gemini_api_key:
+            raise ValueError(
+                "GEMINI_API_KEY required when llm_provider=gemini "
+                "(or set KLOC_STUB_MODE=true)"
+            )
+        # openrouter / bedrock: no key field on Settings yet — leave alone.
+        return self
 
 
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    global _settings
-    if _settings is None:
-        _settings = Settings()
-    return _settings
+    return Settings()

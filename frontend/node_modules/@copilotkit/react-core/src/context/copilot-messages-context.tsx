@@ -4,7 +4,7 @@
 
 import { Message } from "@copilotkit/runtime-client-gql";
 import React from "react";
-import { Suggestion } from "@copilotkitnext/core";
+import { Suggestion } from "@copilotkit/core";
 
 export interface CopilotMessagesContextParams {
   messages: Message[];

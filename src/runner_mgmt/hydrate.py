@@ -36,25 +36,43 @@ log = logging.getLogger(__name__)
 
 # Backend-side directory inside the backend container where hydration
 # files are written. Backed by named volume `kloc-hydration` (see
-# `docker-compose.yml`).
-HYDRATION_BACKEND_DIR = Path(
-    os.environ.get("KLOC_HYDRATION_BACKEND_DIR", "/tmp/kloc-hydration")
-)
+# `docker-compose.yml`). Read lazily so test/operator env overrides set
+# AFTER module import are honoured.
+_DEFAULT_HYDRATION_BACKEND_DIR = "/tmp/kloc-hydration"
+
+
+def _hydration_backend_dir() -> Path:
+    return Path(
+        os.environ.get(
+            "KLOC_HYDRATION_BACKEND_DIR", _DEFAULT_HYDRATION_BACKEND_DIR
+        )
+    )
+
 
 # Runner-side directory where the same named volume surfaces. The
 # per-spawn filename is `<runner_id>.json`; the absolute path is
 # exposed to the runner via `KLOC_HYDRATION_PATH` env at spawn time.
 HYDRATION_RUNNER_DIR = "/run/kloc"
 
-# Named Docker volume that backs both mount points. Declared in
-# `docker-compose.yml` top-level `volumes:` block.
-HYDRATION_VOLUME_NAME = os.environ.get(
-    "KLOC_HYDRATION_VOLUME", "kloc-hydration"
-)
+
+def _hydration_volume_name() -> str:
+    return os.environ.get("KLOC_HYDRATION_VOLUME", "kloc-hydration")
+
+
+# Module-level `__getattr__` lets older import sites
+# (`from src.runner_mgmt.hydrate import HYDRATION_VOLUME_NAME`) keep
+# working while the actual value is resolved lazily on every access.
+# Tests + tooling that set the env after import now see the new value.
+def __getattr__(name: str):
+    if name == "HYDRATION_VOLUME_NAME":
+        return _hydration_volume_name()
+    if name == "HYDRATION_BACKEND_DIR":
+        return _hydration_backend_dir()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _backend_path_for(runner_id: str) -> Path:
-    return HYDRATION_BACKEND_DIR / f"{runner_id}.json"
+    return _hydration_backend_dir() / f"{runner_id}.json"
 
 
 def runner_mount_path_for(runner_id: str) -> str:
@@ -72,7 +90,7 @@ def write_hydration_tempfile(runner_id: str, payload: Any) -> Path:
 
     Creates the directory tree if missing — first-spawn-after-boot will
     need this when the named volume is fresh."""
-    HYDRATION_BACKEND_DIR.mkdir(parents=True, exist_ok=True)
+    _hydration_backend_dir().mkdir(parents=True, exist_ok=True)
     path = _backend_path_for(runner_id)
     if hasattr(payload, "model_dump_json"):
         body = payload.model_dump_json()
@@ -107,7 +125,7 @@ def build_hydration_mount() -> dict:
     and avoids the legacy host-path resolution bug entirely (B-INFRA-3)."""
     return {
         "Type": "volume",
-        "Source": HYDRATION_VOLUME_NAME,
+        "Source": _hydration_volume_name(),
         "Target": HYDRATION_RUNNER_DIR,
         "ReadOnly": True,
     }
