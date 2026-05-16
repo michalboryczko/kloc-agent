@@ -2,9 +2,18 @@
 
 ISS-03: stop() previously cancelled the worker without draining `_after_queue`,
 silently dropping up to 256 `tool_call.completed` audit rows per graceful
-shutdown (including warm-idle eviction). These tests assert every queued
-payload is POSTed before the worker is cancelled and that the drain tolerates
-per-payload transport failures."""
+shutdown (including warm-idle eviction).
+
+WR-05: a later iteration cancels the worker FIRST, then drains. Drain-first
+raced the live worker for queue items: if the worker won `get()` on a
+payload before drain started, that payload's in-flight POST got cancelled
+mid-await and the row was lost anyway. Cancel-first makes the drain run
+under exclusive ownership of the queue; the only loss is the at-most-one
+item the worker had already grabbed (which would have been lost under
+either ordering).
+
+These tests assert every queued payload is POSTed during drain and that
+the drain tolerates per-payload transport failures."""
 from __future__ import annotations
 
 import asyncio
@@ -122,6 +131,55 @@ async def test_stop_with_empty_queue_does_not_call_post(monkeypatch: pytest.Monk
     await sender.stop()
 
     assert calls == []
+    assert sender._http is None
+
+
+async def test_stop_cancels_worker_before_draining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-05 regression: when the worker is actively awaiting the next
+    queue item, stop() must cancel it BEFORE the drain runs so the
+    drain has exclusive ownership of the queue. With cancel-first, no
+    queue item can be claimed by the worker after drain begins; with
+    the old drain-first order, the worker could claim an item between
+    drain iterations, then get cancelled mid-POST, losing the row.
+
+    We verify ordering by recording the moment of worker-cancellation
+    relative to each _post call. Every _post must run AFTER the worker
+    task is done (cancelled)."""
+    sender = _make_sender()
+    http = _FakeHttp()
+    sender._http = http  # type: ignore[assignment]
+
+    # Real worker: parks on queue.get() until cancelled or item arrives.
+    # NOT pre-completed -- so we can observe ordering.
+    sender._after_worker = asyncio.create_task(sender._after_loop())
+    await asyncio.sleep(0)  # let the worker reach `await get()`
+
+    worker_done_when_called: list[bool] = []
+
+    async def _fake_post(self: AuditHookSender, payload: dict, event_name: str) -> dict:
+        worker_done_when_called.append(
+            self._after_worker is not None and self._after_worker.done()
+        )
+        return {}
+
+    monkeypatch.setattr(AuditHookSender, "_post", _fake_post)
+
+    for i in range(3):
+        sender._after_queue.put_nowait(
+            {"event": "AfterToolCall", "marker": i}
+        )
+
+    await sender.stop()
+
+    # Every _post invoked from the drain must have observed the worker
+    # as already-done (cancelled). With the pre-fix order (drain first,
+    # cancel later) this would record False on every call.
+    assert worker_done_when_called == [True, True, True], (
+        f"_post ran with worker still live: {worker_done_when_called}"
+    )
+    assert sender._after_queue.empty()
     assert sender._http is None
 
 

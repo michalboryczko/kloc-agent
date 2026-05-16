@@ -68,13 +68,27 @@ class AuditHookSender:
             self._after_worker = asyncio.create_task(self._after_loop())
 
     async def stop(self) -> None:
-        # Drain queued AfterToolCall payloads BEFORE cancelling the worker.
-        # Cancelling first would discard everything still in the queue and
-        # silently lose tool_call.completed audit rows on graceful shutdown
-        # (warm-idle eviction, container stop). The per-request timeout on
-        # self._http bounds each POST; total wall-clock is at most
-        # HOOK_DEADLINE_S * queue_len.
-        if self._http is not None and self._after_worker is not None:
+        # Cancel the worker FIRST so it stops competing with the drain
+        # for queue items. If the worker had grabbed an item via
+        # `await self._after_queue.get()` before stop() was called, it
+        # is now either: (a) past its `await self._post(...)` (row
+        # already persisted, nothing to do), or (b) suspended inside
+        # `_post` and gets a CancelledError on the next await
+        # boundary, which discards the in-flight item. (b) is an
+        # acceptable loss of one row; the alternative (drain first)
+        # races with the worker and can lose the SAME item via a
+        # different code path while ALSO making drain non-exclusive,
+        # making the race harder to reason about. After cancel, drain
+        # under exclusive ownership of the queue. The per-request
+        # timeout on self._http bounds each POST; total wall-clock is
+        # at most HOOK_DEADLINE_S * queue_len.
+        if self._after_worker:
+            self._after_worker.cancel()
+            try:
+                await self._after_worker
+            except asyncio.CancelledError:
+                pass
+        if self._http is not None:
             while True:
                 try:
                     payload = self._after_queue.get_nowait()
@@ -84,12 +98,6 @@ class AuditHookSender:
                     await self._post(payload, "AfterToolCall")
                 except Exception:
                     log.exception("audit.after_post_failed_during_drain")
-        if self._after_worker:
-            self._after_worker.cancel()
-            try:
-                await self._after_worker
-            except (asyncio.CancelledError, BaseException):
-                pass
         if self._http:
             await self._http.aclose()
             self._http = None

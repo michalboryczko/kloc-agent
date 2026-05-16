@@ -59,7 +59,7 @@ class BackendChannel:
                 task.cancel()
                 try:
                     await task
-                except (asyncio.CancelledError, BaseException):
+                except asyncio.CancelledError:
                     pass
         if self._http:
             await self._http.aclose()
