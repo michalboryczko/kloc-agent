@@ -147,28 +147,40 @@ async def stream_get(
     if execution is None:
         raise HTTPException(status_code=404, detail="unknown execution")
 
-    async def generator() -> AsyncIterator[dict]:
-        for entry_dict in execution.replay_from(last_event_id):
-            yield entry_dict["event"]
-        if execution.status != "running":
-            return
-        last_seq = (
-            execution.events[-1]["seq"] if execution.events else last_event_id
-        )
-        async for event in _live_stream(session_id, run_id, last_seq=last_seq):
-            yield event
+    # Register the live subscriber BEFORE snapshotting the execution ring.
+    # Otherwise any event appended between the replay snapshot and a later
+    # `subscribe` call would be queued onto no subscriber and silently lost
+    # (it leaves the ring window, then `event_bus.publish` finds no queue).
+    # Doing a second-pass replay using the highest seq we saw closes the
+    # remaining gap for events that were appended to the ring AFTER our
+    # first replay but BEFORE the publish that filled our queue.
+    queue = await event_bus.register(session_id, run_id)
+    try:
+        async def generator() -> AsyncIterator[dict]:
+            highest_seq = last_event_id
+            for entry_dict in execution.replay_from(last_event_id):
+                highest_seq = entry_dict["seq"]
+                yield entry_dict["event"]
+            if execution.status != "running":
+                return
+            # Second-pass replay covers anything appended to the ring
+            # between the first replay and the queue registration.
+            for entry_dict in execution.replay_from(highest_seq):
+                highest_seq = entry_dict["seq"]
+                yield entry_dict["event"]
+            async for event in event_bus.consume(session_id, run_id, queue):
+                yield event
+                if is_run_lifecycle_terminal(event):
+                    return
 
-    return make_response(request, generator())
-
-
-async def _live_stream(
-    session_id: str, run_id: str, last_seq: int | None
-) -> AsyncIterator[dict]:
-    """Subscribe to live runner events. Stops on terminal lifecycle."""
-    async for event in event_bus.subscribe(session_id, run_id):
-        yield event
-        if is_run_lifecycle_terminal(event):
-            return
+        return make_response(request, generator())
+    except BaseException:
+        # The generator may never be iterated by the framework if
+        # `make_response` itself raises before returning. Discard the
+        # queue from `_subs` so it does not leak forever and saturate
+        # under publish.
+        await event_bus.unregister(session_id, run_id, queue)
+        raise
 
 
 async def _persist_user_message(

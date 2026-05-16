@@ -130,6 +130,137 @@ class _FakeRequest:
         return self._body
 
 
+# ---------------------------------------------------------------------------
+# CR-01 regression: the GET reconnect handler (`stream_get`) must not drop
+# events that land between the replay-from-ring snapshot and the live-tail
+# subscription. Pre-fix code did replay then subscribe — events appended
+# in that window were never seen by the resumed client. Post-fix: register
+# the queue FIRST, snapshot the ring, replay, then do a second-pass replay
+# using the highest seen seq to close the remaining window, then consume.
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_get_replay_then_live_does_not_drop_between_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window between `replay_from` and the subscriber being live on
+    the bus must be covered by a second-pass replay so no event with
+    `seq > last_event_id` is silently dropped on reconnect."""
+    from src.api import stream as stream_mod
+    from src.streaming.event_bus import event_bus
+    from src.streaming.execution_registry import (
+        Execution,
+        execution_registry,
+    )
+
+    sid = str(uuid.uuid4())
+    rid = "rGetSeam"
+    execution = Execution(session_id=sid, run_id=rid)
+    execution.append({"type": "RUN_STARTED", "runId": rid})
+    execution.append(
+        {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "a"}
+    )
+    # Inject the execution into the global registry so stream_get can
+    # find it; ensure cleanup so other tests don't see this run id.
+    async with execution_registry._lock:
+        execution_registry._executions[(sid, rid)] = execution
+
+    # Capture the generator that stream_get returns so we can drive it
+    # in-test. The real `make_response` would wrap it in a
+    # StreamingResponse + AG-UI encoder; we want the raw event stream.
+    captured: dict[str, Any] = {}
+
+    def _fake_make_response(_req, generator):
+        captured["gen"] = generator
+        return {"generator": generator}
+
+    monkeypatch.setattr(stream_mod, "make_response", _fake_make_response)
+
+    request = _FakeRequest(_FakeApp(), body={})
+
+    # We need to interpose between "register" and "first replay" so we can
+    # append a SEAM event AFTER the subscriber's queue exists but BEFORE
+    # the generator pulls from the ring. Easiest: wrap `register` to
+    # append a seam event to the ring as a side-effect right after the
+    # queue is added to `_subs`. Pre-fix code (subscribe AFTER replay)
+    # would publish the seam onto NO queue (queue not yet registered),
+    # then replay snapshot would not include it because the ring was
+    # captured before append. Post-fix: register-first guarantees the
+    # publish path queues the event, AND a second-pass replay over the
+    # ring (which the seam IS in) also yields it (de-dup is the caller's
+    # problem — same as the multi-subscriber case).
+    real_register = event_bus.register
+    seam_event = {
+        "type": "TEXT_MESSAGE_CONTENT",
+        "messageId": "m1",
+        "delta": "SEAM",
+    }
+
+    async def _register_then_append_seam(session_id, run_id):
+        queue = await real_register(session_id, run_id)
+        # Append AND publish, mirroring how `_dispatch_frame` does it:
+        # ring append + bus publish in a single critical section.
+        execution.append(seam_event)
+        await event_bus.publish(session_id, run_id, seam_event)
+        return queue
+
+    monkeypatch.setattr(event_bus, "register", _register_then_append_seam)
+
+    try:
+        await stream_mod.stream_get(
+            request=request,  # type: ignore[arg-type]
+            session_id=sid,
+            run_id=rid,
+            last_event_id=None,
+        )
+
+        # Collect events the resumed client would see. Publish a terminal
+        # frame so the consume loop exits naturally.
+        gen = captured["gen"]
+
+        async def _drain_and_terminate() -> list[dict]:
+            collected: list[dict] = []
+
+            async def _publish_terminal() -> None:
+                # Let the generator start before we publish terminal.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                await event_bus.publish(
+                    sid, rid, {"type": "RUN_FINISHED", "runId": rid}
+                )
+
+            publisher = asyncio.create_task(_publish_terminal())
+            try:
+                async for evt in gen:
+                    collected.append(evt)
+            finally:
+                if not publisher.done():
+                    publisher.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await publisher
+            return collected
+
+        events = await asyncio.wait_for(_drain_and_terminate(), timeout=5.0)
+
+        # The SEAM event must appear at least once. Pre-fix, the snapshot
+        # would not contain it (taken before append) AND it would never
+        # land on the queue (subscribe ran AFTER publish), so it would
+        # be silently dropped from the resumed client's view.
+        seam_seen = [e for e in events if e.get("delta") == "SEAM"]
+        assert len(seam_seen) >= 1, (
+            f"SEAM event lost across replay/live seam; saw events: "
+            f"{[e.get('type') for e in events]}"
+        )
+        # Lifecycle terminal closed the stream.
+        assert events[-1]["type"] == "RUN_FINISHED"
+    finally:
+        # Clean up the execution we injected so other tests don't see it.
+        async with execution_registry._lock:
+            execution_registry._executions.pop((sid, rid), None)
+        # Drop any subscriber queues left behind on the bus topic.
+        await event_bus.close(sid, rid)
+
+
 async def test_concurrent_reconnect_does_not_double_spawn_persister(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

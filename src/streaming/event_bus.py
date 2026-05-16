@@ -67,6 +67,25 @@ class EventBus:
             self._subs[key].add(q)
         return q
 
+    async def unregister(
+        self, session_id: str, run_id: str, queue: asyncio.Queue[dict]
+    ) -> None:
+        """Discard a previously-registered queue without iterating it.
+
+        Use this on any early-exit path between `register` and `consume`:
+        `consume`'s `finally` block only runs once iteration has started,
+        so a queue registered but never consumed leaks into `_subs` and
+        `publish` keeps `put_nowait`'ing into it until it saturates and
+        triggers the slow-subscriber sentinel for unrelated subscribers.
+        """
+        key = (session_id, run_id)
+        async with self._lock:
+            bucket = self._subs.get(key)
+            if bucket is not None:
+                bucket.discard(queue)
+                if not bucket:
+                    self._subs.pop(key, None)
+
     async def consume(
         self, session_id: str, run_id: str, queue: asyncio.Queue[dict]
     ) -> AsyncIterator[dict]:
