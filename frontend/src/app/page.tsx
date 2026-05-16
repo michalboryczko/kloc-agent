@@ -25,6 +25,14 @@ type PickedSession = {
   initialMessages: Message[];
 };
 
+export type BusyState =
+  | { kind: "none" }
+  | { kind: "new" }
+  | { kind: "pick"; id: string };
+
+const BUSY_NONE: BusyState = { kind: "none" };
+const BUSY_NEW: BusyState = { kind: "new" };
+
 function isAbortError(e: unknown): boolean {
   return (
     e instanceof DOMException && e.name === "AbortError"
@@ -46,7 +54,7 @@ export default function HomePage() {
   const [picked, setPicked] = useState<PickedSession | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [busy, setBusy] = useState<BusyState>(BUSY_NONE);
 
   // Tracks the in-flight user-pick fetch (listMessages / createSession) so a
   // back-navigation or rapid retry cancels the previous request.
@@ -78,7 +86,7 @@ export default function HomePage() {
     abortPick();
     const ctrl = new AbortController();
     pickCtrlRef.current = ctrl;
-    setBusyId(s.id);
+    setBusy({ kind: "pick", id: s.id });
     try {
       const page = await listMessages(s.id, { limit: 500, signal: ctrl.signal });
       if (ctrl.signal.aborted) return;
@@ -89,7 +97,7 @@ export default function HomePage() {
     } finally {
       if (pickCtrlRef.current === ctrl) {
         pickCtrlRef.current = null;
-        setBusyId(null);
+        setBusy(BUSY_NONE);
       }
     }
   }
@@ -99,7 +107,7 @@ export default function HomePage() {
     abortPick();
     const ctrl = new AbortController();
     pickCtrlRef.current = ctrl;
-    setBusyId("__new__");
+    setBusy(BUSY_NEW);
     try {
       const r = await createSession({ signal: ctrl.signal });
       if (ctrl.signal.aborted) return;
@@ -110,7 +118,7 @@ export default function HomePage() {
     } finally {
       if (pickCtrlRef.current === ctrl) {
         pickCtrlRef.current = null;
-        setBusyId(null);
+        setBusy(BUSY_NONE);
       }
     }
   }
@@ -126,7 +134,7 @@ export default function HomePage() {
       <SessionPicker
         sessions={sessions}
         error={error}
-        busyId={busyId}
+        busy={busy}
         onPick={pickExisting}
         onNew={startNew}
       />
