@@ -149,3 +149,64 @@ body > * {
   flex: 1 1 auto;
   min-height: 0;
 }
+
+@layer utilities {
+  /*
+    Entrance fade-up — 220ms with optional 20/40/60ms staggers. Used by the
+    picker on first paint. Suppressed under prefers-reduced-motion via the
+    Tailwind `motion-reduce:` prefix at the callsite (preferred over a global
+    @media rule so future callers can opt out per-element).
+  */
+  @keyframes kloc-fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .animate-kloc-fade-up {
+    animation: kloc-fade-up 220ms var(--ease-out-snappy) both;
+  }
+
+  .animate-kloc-fade-up-delay-1 {
+    animation: kloc-fade-up 220ms var(--ease-out-snappy) 20ms both;
+  }
+
+  .animate-kloc-fade-up-delay-2 {
+    animation: kloc-fade-up 220ms var(--ease-out-snappy) 40ms both;
+  }
+
+  .animate-kloc-fade-up-delay-3 {
+    animation: kloc-fade-up 220ms var(--ease-out-snappy) 60ms both;
+  }
+
+  /*
+    Streaming indicator — three dots whose opacity cycles. Each dot lags its
+    predecessor by 150ms via `animation-delay`. Total cycle 1200ms so the
+    "wave" reads as a slow conversation pulse, not a frantic loader.
+  */
+  @keyframes kloc-pulse-dot {
+    0%, 80%, 100% {
+      opacity: 0.3;
+    }
+    40% {
+      opacity: 1;
+    }
+  }
+
+  .animate-kloc-pulse-dot {
+    animation: kloc-pulse-dot 1200ms ease-in-out infinite both;
+  }
+
+  .kloc-pulse-dot-2 {
+    animation-delay: 150ms;
+  }
+
+  .kloc-pulse-dot-3 {
+    animation-delay: 300ms;
+  }
+}

@@ -24,8 +24,9 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "kloc-agent",
-  description: "Analyst chat over kloc-intelligence",
+  title: "kloc agent",
+  description:
+    "Analyst chat over an indexed codebase. Live agent reasoning, MCP tool calls, persistent audit log.",
 };
 
 export default function RootLayout({

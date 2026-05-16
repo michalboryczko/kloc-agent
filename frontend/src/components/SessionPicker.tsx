@@ -24,18 +24,25 @@ export function SessionPicker({
 
   return (
     <main className="mx-auto max-w-[620px] px-6 pt-20 pb-12">
-      <p className={cn(eyebrow, "mb-6")}>— analyst chat</p>
+      <p
+        className={cn(
+          eyebrow,
+          "mb-6 motion-safe:animate-kloc-fade-up-delay-1",
+        )}
+      >
+        — analyst chat
+      </p>
 
-      <h1 className="font-serif italic text-[64px] leading-[1.05] tracking-[-0.02em] text-[var(--text)]">
+      <h1 className="font-serif italic text-[64px] leading-[1.05] tracking-[-0.02em] text-[var(--text)] motion-safe:animate-kloc-fade-up">
         kloc <span>agent</span>
         <span className="text-[var(--accent)]">.</span>
       </h1>
 
-      <p className="mt-6 text-[15px] text-[var(--text-mute)]">
+      <p className="mt-6 text-[15px] text-[var(--text-mute)] motion-safe:animate-kloc-fade-up-delay-1">
         Resume a previous chat or start a new one.
       </p>
 
-      <div className="mt-8 flex items-center gap-4">
+      <div className="mt-8 flex items-center gap-4 motion-safe:animate-kloc-fade-up-delay-2">
         <Button
           variant="primary"
           onClick={onNew}
@@ -68,7 +75,7 @@ export function SessionPicker({
       )}
 
       {sessions !== null && sessions.length > 0 && (
-        <>
+        <div className="motion-safe:animate-kloc-fade-up-delay-3">
           <p className={cn(eyebrow, "mt-12 mb-2")}>— recent</p>
           <ul className="divide-y divide-[var(--line)] border-t border-[var(--line)]">
             {sessions.map((s) => (
@@ -114,7 +121,7 @@ export function SessionPicker({
               </li>
             ))}
           </ul>
-        </>
+        </div>
       )}
     </main>
   );
