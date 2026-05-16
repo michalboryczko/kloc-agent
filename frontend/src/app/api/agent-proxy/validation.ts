@@ -4,9 +4,6 @@ export type IncomingMessage = {
   id?: string;
   role: string;
   content?: unknown;
-  // ag-ui-protocol 0.1.18 message shape is loose at this layer; the backend
-  // re-parses via pydantic.
-  [key: string]: unknown;
 };
 
 export type IncomingBody = {

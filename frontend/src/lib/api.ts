@@ -7,7 +7,7 @@
 // Every helper accepts an optional `signal?: AbortSignal`. React hook
 // callers manage controller lifecycle (effect cleanup, nav, dedup).
 
-import { BROWSER_BACKEND_URL } from "./config";
+import { BROWSER_BACKEND_URL } from "./config.ts";
 
 export type SessionCreateResponse = {
   session_id: string;
