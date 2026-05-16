@@ -173,9 +173,13 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
         and active_by_session is not None
     ):
         # End-of-run cleanup so a stale run_id can't leak into the next
-        # run on this session. Safe to call after publish — the bus
-        # subscriber has already received the terminal frame.
-        active_by_session.pop(session_id, None)
+        # run on this session. Compare-and-swap: only pop when the cached
+        # active run matches THIS terminal frame's run_id. A late
+        # RUN_FINISHED(rA) racing a fresh RUN_STARTED(rB) on the same
+        # session must NOT wipe B's mapping, or B's next intermediate
+        # frame would be misrouted as a spurious orphan (ISS-04).
+        if active_by_session.get(session_id) == str(run_id):
+            active_by_session.pop(session_id, None)
 
 
 # Per-line cap on JSONL frames (reviewer-1 Low-3). 1 MiB is generous for
