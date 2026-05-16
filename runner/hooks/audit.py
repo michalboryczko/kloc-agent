@@ -68,6 +68,22 @@ class AuditHookSender:
             self._after_worker = asyncio.create_task(self._after_loop())
 
     async def stop(self) -> None:
+        # Drain queued AfterToolCall payloads BEFORE cancelling the worker.
+        # Cancelling first would discard everything still in the queue and
+        # silently lose tool_call.completed audit rows on graceful shutdown
+        # (warm-idle eviction, container stop). The per-request timeout on
+        # self._http bounds each POST; total wall-clock is at most
+        # HOOK_DEADLINE_S * queue_len.
+        if self._http is not None and self._after_worker is not None:
+            while True:
+                try:
+                    payload = self._after_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    await self._post(payload, "AfterToolCall")
+                except Exception:
+                    log.exception("audit.after_post_failed_during_drain")
         if self._after_worker:
             self._after_worker.cancel()
             try:
