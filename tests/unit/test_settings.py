@@ -242,3 +242,46 @@ def test_hmac_fallback_error_message_names_both_env_vars(
     msg = str(exc_info.value)
     assert "KLOC_HOOK_SECRET" in msg
     assert "KLOC_STUB_MODE" in msg
+
+
+# ---------------------------------------------------------------------------
+# ISS-12: kloc_runner_mode removed from Settings, .env.example
+# ---------------------------------------------------------------------------
+
+
+def test_settings_has_no_kloc_runner_mode_field(monkeypatch, tmp_path) -> None:
+    # ISS-12: kloc_runner_mode is removed. Asserting the field no longer
+    # exists pins the contract: any future "let's re-add a stub mode" PR
+    # has to delete this test deliberately.
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.chdir(tmp_path)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert not hasattr(s, "kloc_runner_mode")
+    # Pydantic-settings stores known field names on model_fields.
+    assert "kloc_runner_mode" not in Settings.model_fields
+
+
+def test_stale_kloc_runner_mode_env_var_is_ignored(
+    monkeypatch, tmp_path
+) -> None:
+    # Operators with old .env files may still have KLOC_RUNNER_MODE set.
+    # Settings has extra="ignore" — the var must be silently dropped, not
+    # revived as a real attribute.
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.setenv("KLOC_RUNNER_MODE", "stub")
+    monkeypatch.chdir(tmp_path)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert not hasattr(s, "kloc_runner_mode")
+
+
+def test_env_example_has_no_kloc_runner_mode_entry() -> None:
+    # ISS-12: .env.example must no longer document the removed field.
+    from pathlib import Path
+
+    env_example = Path(__file__).resolve().parents[2] / ".env.example"
+    text = env_example.read_text()
+    assert "KLOC_RUNNER_MODE" not in text

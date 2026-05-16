@@ -54,15 +54,6 @@ class Settings(BaseSettings):
     # name (COMPOSE_PROJECT_NAME doesn't apply to explicit-name networks).
     kloc_docker_network: str = "kloc"
     kloc_skills_dir_host: str = "./skills"
-    kloc_runner_mode: Literal["docker", "stub"] = Field(
-        default="docker",
-        description=(
-            "B-INFRA-1: 'docker' (default) requires aiodocker + a bind-mounted "
-            "/var/run/docker.sock — DockerRunner construction failure hard-fails "
-            "boot. 'stub' is the CI / local-without-docker mode and tolerates "
-            "missing aiodocker."
-        ),
-    )
 
     llm_provider: LlmProvider = "gemini"
     anthropic_api_key: str | None = None

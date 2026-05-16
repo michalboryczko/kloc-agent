@@ -120,11 +120,6 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-console}
       OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-console}
-      # Runner spawn mode. Defaults to "docker" — backend spawns per-session
-      # runner containers on the host daemon via the bind-mounted socket
-      # below. Set to "stub" to skip DockerRunner construction entirely (CI,
-      # local-without-docker dev). Real PoC traffic requires "docker".
-      KLOC_RUNNER_MODE: ${KLOC_RUNNER_MODE:-docker}
       # Streamable-HTTP MCP URL the runner uses to reach kloc-intelligence.
       # kloc-intelligence runs as its own docker-compose stack on the
       # operator host (Neo4j + Qdrant + `mcp-server-http`); the runner
@@ -140,7 +135,8 @@ services:
     volumes:
       # Docker-outside-of-Docker (sibling-container pattern). The backend
       # manages per-session runner containers on the host daemon via
-      # aiodocker → DockerRunner. Required when KLOC_RUNNER_MODE=docker.
+      # aiodocker → DockerRunner. The socket bind-mount is mandatory; without
+      # it lifespan fails loudly at boot.
       - /var/run/docker.sock:/var/run/docker.sock
       # B-INFRA-3: named volume so backend writes + runner reads see the
       # same Docker-managed filesystem. A relative bind-mount would
