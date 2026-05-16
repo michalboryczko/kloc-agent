@@ -75,3 +75,48 @@ def test_gemini_branch_enforced(monkeypatch, tmp_path) -> None:
 
     with pytest.raises((ValidationError, ValueError)):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# ISS-05: llm_model_id field with provider-aware default resolution
+# ---------------------------------------------------------------------------
+
+
+def test_llm_model_id_defaults_to_gemini_model_when_provider_gemini(
+    monkeypatch, tmp_path
+) -> None:
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.delenv("LLM_MODEL_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.llm_model_id == "gemini-3.1-pro-preview"
+
+
+def test_llm_model_id_defaults_to_anthropic_model_when_provider_anthropic(
+    monkeypatch, tmp_path
+) -> None:
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.delenv("LLM_MODEL_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.llm_model_id == "claude-3-5-haiku-20241022"
+
+
+def test_llm_model_id_env_override_wins(monkeypatch, tmp_path) -> None:
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("LLM_MODEL_ID", "custom-model-x")
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.llm_model_id == "custom-model-x"

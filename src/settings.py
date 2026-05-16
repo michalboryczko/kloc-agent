@@ -68,6 +68,20 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
 
+    # When unset, the provider-aware default is resolved inside
+    # `_validate_provider_key` so `settings.llm_model_id` is always a
+    # non-empty `str` after construction. An explicit env value wins
+    # over the default regardless of provider.
+    llm_model_id: str | None = Field(
+        default=None,
+        description=(
+            "Concrete model identifier passed into HydrationPayload. "
+            "Defaults to a provider-appropriate model when unset "
+            "(`gemini-3.1-pro-preview` for gemini, "
+            "`claude-3-5-haiku-20241022` for anthropic)."
+        ),
+    )
+
     backend_url: str = "http://localhost:8000"
 
     kloc_mcp_url: str = Field(
@@ -140,19 +154,31 @@ class Settings(BaseSettings):
         # Validate at boot, not first LLM call. Empty string was accepted
         # silently before — now we require the key for the configured provider.
         # Allow missing in stub mode (tests / CI) — checked at runtime.
-        if self.stub_mode:
-            return self
-        if self.llm_provider == "anthropic" and not self.anthropic_api_key:
-            raise ValueError(
-                "ANTHROPIC_API_KEY required when llm_provider=anthropic "
-                "(or set KLOC_STUB_MODE=true)"
-            )
-        if self.llm_provider == "gemini" and not self.gemini_api_key:
-            raise ValueError(
-                "GEMINI_API_KEY required when llm_provider=gemini "
-                "(or set KLOC_STUB_MODE=true)"
-            )
+        if not self.stub_mode:
+            if self.llm_provider == "anthropic" and not self.anthropic_api_key:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY required when llm_provider=anthropic "
+                    "(or set KLOC_STUB_MODE=true)"
+                )
+            if self.llm_provider == "gemini" and not self.gemini_api_key:
+                raise ValueError(
+                    "GEMINI_API_KEY required when llm_provider=gemini "
+                    "(or set KLOC_STUB_MODE=true)"
+                )
         # openrouter / bedrock: no key field on Settings yet — leave alone.
+
+        # Resolve provider-aware default model_id when the operator left it
+        # unset. Done here (not via a `Field(default_factory=...)`) because
+        # the default depends on a *sibling* field (`llm_provider`), which
+        # is only available after model construction.
+        if self.llm_model_id is None:
+            object.__setattr__(
+                self,
+                "llm_model_id",
+                "gemini-3.1-pro-preview"
+                if self.llm_provider == "gemini"
+                else "claude-3-5-haiku-20241022",
+            )
         return self
 
 
