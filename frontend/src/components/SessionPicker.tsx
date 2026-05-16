@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import type { SessionListItem } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -21,6 +22,15 @@ export function SessionPicker({
 }: SessionPickerProps) {
   const sessionCount = sessions?.length ?? 0;
   const eyebrow = "text-[10.5px] font-mono uppercase tracking-[0.18em] text-[var(--text-dim)]";
+
+  const formattedSessions = useMemo(
+    () =>
+      sessions?.map((s) => ({
+        ...s,
+        updatedLabel: new Date(s.updated_at).toLocaleString(),
+      })) ?? null,
+    [sessions],
+  );
 
   return (
     <main className="mx-auto max-w-[620px] px-6 pt-20 pb-12">
@@ -74,11 +84,11 @@ export function SessionPicker({
         </p>
       )}
 
-      {sessions !== null && sessions.length > 0 && (
+      {formattedSessions !== null && formattedSessions.length > 0 && (
         <div className="motion-safe:animate-kloc-fade-up-delay-3">
           <p className={cn(eyebrow, "mt-12 mb-2")}>— recent</p>
           <ul className="divide-y divide-[var(--line)] border-t border-[var(--line)]">
-            {sessions.map((s) => (
+            {formattedSessions.map((s) => (
               <li key={s.id}>
                 <button
                   type="button"
@@ -107,7 +117,7 @@ export function SessionPicker({
                         {s.message_count} msg{s.message_count === 1 ? "" : "s"}
                       </span>
                       <span aria-hidden>·</span>
-                      <span>{new Date(s.updated_at).toLocaleString()}</span>
+                      <span>{s.updatedLabel}</span>
                     </div>
                   </div>
                   <span className="font-mono text-[11.5px] text-[var(--text-dim)] mt-0.5 shrink-0">
