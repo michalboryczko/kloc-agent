@@ -79,12 +79,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # caches the active run_id per session here on RUN_STARTED and uses
     # it to route every non-lifecycle frame to the right bus topic.
     # Process-local dict; PoC is single-uvicorn-worker.
-    app.state.active_run_by_session: dict[str, str] = {}
+    app.state.active_run_by_session = {}
     # Resume / replay buffer: under reconnect a non-lifecycle frame
     # may arrive before the new run's RUN_STARTED has been observed.
     # `_dispatch_frame` parks them per-session here and flushes when
     # the matching RUN_STARTED lands. Bounded; see _PRE_RUN_BUFFER_CAP.
-    app.state.pending_pre_run_started: dict[str, list[dict]] = {}
+    app.state.pending_pre_run_started = {}
     # audit_emit closure: each emit opens a fresh AsyncSession + commits
     # one row, so RunnerRegistry / WarmIdleManager / HeartbeatWatcher can
     # write audit rows without sharing the request-scoped session.
