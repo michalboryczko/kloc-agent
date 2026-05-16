@@ -15,9 +15,7 @@ import { AgentBody } from "@/components/AgentBody";
 import { SessionPicker } from "@/components/SessionPicker";
 import { SessionRail } from "@/components/SessionRail";
 import { Button } from "@/components/ui/button";
-
-const AGENT_NAME =
-  process.env.NEXT_PUBLIC_COPILOTKIT_AGENT_NAME ?? "kloc_agent";
+import { AGENT_NAME } from "@/lib/config";
 
 type PickedSession = {
   sessionId: string;

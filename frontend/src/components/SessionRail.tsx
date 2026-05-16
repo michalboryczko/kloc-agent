@@ -2,17 +2,15 @@
 
 import { useCoAgent } from "@copilotkit/react-core";
 import { cn } from "@/lib/utils";
+import { AGENT_NAME, INITIAL_AGENT_STATE, type Artifact } from "@/lib/config";
 
 type RunnerState = "fresh" | "warm" | "evicted" | "crashed";
 
 type KlocAgentState = {
   session_id?: string;
   runner_state?: RunnerState;
-  artifacts?: Array<{ id: string; filename: string }>;
+  artifacts?: Artifact[];
 };
-
-const AGENT_NAME =
-  process.env.NEXT_PUBLIC_COPILOTKIT_AGENT_NAME ?? "kloc_agent";
 
 const EYEBROW =
   "font-mono text-[10.5px] uppercase tracking-[0.18em] text-[var(--text-dim)]";
@@ -43,7 +41,7 @@ export type SessionRailProps = {
 export function SessionRail({ sessionId }: SessionRailProps) {
   const { state } = useCoAgent<KlocAgentState>({
     name: AGENT_NAME,
-    initialState: { artifacts: [] },
+    initialState: INITIAL_AGENT_STATE,
   });
 
   const runnerState = state?.runner_state;
@@ -107,11 +105,7 @@ function RunnerStateSection({ runnerState }: { runnerState: RunnerState | undefi
   );
 }
 
-function ArtifactsSection({
-  artifacts,
-}: {
-  artifacts: Array<{ id: string; filename: string }>;
-}) {
+function ArtifactsSection({ artifacts }: { artifacts: Artifact[] }) {
   return (
     <section className="flex-1 min-h-0 flex flex-col">
       <p className={cn(EYEBROW, "mb-2")}>Artifacts</p>
