@@ -93,25 +93,36 @@ async def stream_post(
         }
     )
 
+    # ISS-02: dedup persister spawn by (session_id, run_id). Two concurrent
+    # POST /stream calls for the same in-flight run must NOT subscribe two
+    # persisters onto the same bus topic — that double-counts every event
+    # in the execution ring and races two `message_uuid` dicts on the first
+    # delta. The bus already supports many SSE subscribers per topic, so the
+    # second caller still gets a fresh `event_bus.consume` over the same
+    # queue it just registered above; only the persister is shared.
     execution = await execution_registry.get_or_create(session_id, run_id)
 
-    persist_task = asyncio.create_task(
-        _persist_events(
-            session_id=session_id,
-            session_uuid=session_uuid,
-            run_id=run_id,
-            execution=execution,
+    persist_tasks = getattr(request.app.state, "persist_tasks", None)
+    if persist_tasks is None or not isinstance(persist_tasks, dict):
+        persist_tasks = {}
+        request.app.state.persist_tasks = persist_tasks
+
+    key = (session_id, run_id)
+    existing = persist_tasks.get(key)
+    if existing is None or existing.done():
+        persist_task = asyncio.create_task(
+            _persist_events(
+                session_id=session_id,
+                session_uuid=session_uuid,
+                run_id=run_id,
+                execution=execution,
+            )
         )
-    )
-    persist_task.add_done_callback(_log_persist_task_result)
-    # Track the task on app.state so reconnects don't double-spawn the
-    # persister and lifespan can drain it on shutdown.
-    pending = getattr(request.app.state, "persist_tasks", None)
-    if pending is None:
-        pending = set()
-        request.app.state.persist_tasks = pending
-    pending.add(persist_task)
-    persist_task.add_done_callback(pending.discard)
+        persist_task.add_done_callback(_log_persist_task_result)
+        persist_tasks[key] = persist_task
+        persist_task.add_done_callback(
+            lambda t, k=key, d=persist_tasks: d.pop(k, None)
+        )
 
     async def generator() -> AsyncIterator[dict]:
         async for event in event_bus.consume(session_id, run_id, queue):
