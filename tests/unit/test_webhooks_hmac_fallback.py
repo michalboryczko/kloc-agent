@@ -171,46 +171,41 @@ def test_permissive_mode_accepts_fallback_signature_for_unknown_runner() -> None
     assert resp.json()["decision"] == "allow"
 
 
-def test_build_app_settings_construction_does_not_trip_new_validator() -> None:
+def test_build_app_settings_construction_does_not_trip_new_validator(
+    monkeypatch,
+) -> None:
     """Pins the security contract for ISS-07 from the webhook side: the
     Settings() payload used by _build_app must remain constructible
     because BOOTSTRAP_SECRET is non-default. If this test starts failing,
     the validator regressed or _build_app drifted."""
-    # stub_mode is bound via validation_alias=KLOC_STUB_MODE; we already
-    # rely on `_reset_settings_cache` to keep the cache clean. The 3-AND
-    # predicate cannot fire here because the secret is non-default.
-    import os
-
-    os.environ["KLOC_STUB_MODE"] = "true"
-    try:
-        s = Settings(  # type: ignore[call-arg]
-            _env_file=None,
-            kloc_hook_secret=BOOTSTRAP_SECRET,
-            allow_hmac_fallback=True,
-        )
-    finally:
-        os.environ.pop("KLOC_STUB_MODE", None)
+    # stub_mode is bound via validation_alias=KLOC_STUB_MODE; set via env
+    # through `monkeypatch` so the cleanup is automatic (raw os.environ
+    # mutations leak into later test modules' fixtures).
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    s = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        kloc_hook_secret=BOOTSTRAP_SECRET,
+        allow_hmac_fallback=True,
+    )
 
     assert s.allow_hmac_fallback is True
     assert s.kloc_hook_secret == BOOTSTRAP_SECRET
 
 
-def test_build_app_settings_with_default_secret_and_no_stub_would_trip() -> None:
+def test_build_app_settings_with_default_secret_and_no_stub_would_trip(
+    monkeypatch,
+) -> None:
     """ISS-07: the exact combo the new validator is designed to refuse.
     `gemini_api_key` is set so the *provider-key* validator does not raise
     first and mask the HMAC fallback check."""
-    import os
-
     from pydantic import ValidationError
 
-    os.environ.pop("KLOC_STUB_MODE", None)
-    os.environ["GEMINI_API_KEY"] = "stub-key-for-test"
-    try:
-        with pytest.raises((ValidationError, ValueError)):
-            Settings(  # type: ignore[call-arg]
-                _env_file=None,
-                kloc_hook_secret="dev-secret-please-rotate",
-                allow_hmac_fallback=True,
-            )
-    finally:
-        os.environ.pop("GEMINI_API_KEY", None)
+    monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "stub-key-for-test")
+
+    with pytest.raises((ValidationError, ValueError)):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            kloc_hook_secret="dev-secret-please-rotate",
+            allow_hmac_fallback=True,
+        )
