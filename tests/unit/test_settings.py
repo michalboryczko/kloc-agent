@@ -63,6 +63,43 @@ def test_missing_anthropic_key_allowed_when_stub(monkeypatch, tmp_path) -> None:
     assert s.stub_mode is True
 
 
+def test_openrouter_provider_does_not_require_key(
+    monkeypatch, tmp_path
+) -> None:
+    """`openrouter` has no key field on Settings; the validator must
+    accept it cleanly even when stub_mode is off and no provider key
+    is set. Pins the 'leave alone' branch of `_validate_provider_key`."""
+    from src.settings import Settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.llm_provider == "openrouter"
+    assert s.stub_mode is False
+
+
+def test_bedrock_provider_does_not_require_key(
+    monkeypatch, tmp_path
+) -> None:
+    """Same contract as openrouter for `bedrock`: no key field on
+    Settings, so the validator must pass without complaint."""
+    from src.settings import Settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "bedrock")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.llm_provider == "bedrock"
+    assert s.stub_mode is False
+
+
 def test_gemini_branch_enforced(monkeypatch, tmp_path) -> None:
     from pydantic import ValidationError
 
