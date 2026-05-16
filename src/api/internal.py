@@ -16,6 +16,7 @@ carry `type: "heartbeat"`.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import sys
@@ -33,10 +34,20 @@ router = APIRouter(tags=["internal"])
 log = logging.getLogger("kloc_agent.internal")
 
 
+@functools.lru_cache(maxsize=1)
+def _diag_enabled() -> bool:
+    # Settings construction may raise (e.g. missing provider key); diagnostics
+    # are best-effort, so a build failure means "off", never a crash.
+    try:
+        return bool(get_settings().diag_events)
+    except Exception:
+        return False
+
+
 def _diag(msg: str) -> None:
     """Off by default. Direct stderr bypasses uvicorn's --log-config
     which can filter `kloc_agent.*` INFO records in some images."""
-    if not get_settings().diag_events:
+    if not _diag_enabled():
         return
     print(msg, file=sys.stderr, flush=True)
 
