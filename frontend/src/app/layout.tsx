@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Geist, Instrument_Serif, JetBrains_Mono } from "next/font/google";
-import "@copilotkit/react-ui/styles.css";
 import "./globals.css";
 
 const instrumentSerif = Instrument_Serif({
