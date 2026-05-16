@@ -278,18 +278,18 @@ async def ingest_runner_events(
             count += 1
             await _dispatch_frame(request, sid, frame)
     except ClientDisconnect:
-        # The runner closed its end mid-stream. With the runner-side
-        # reconnect loop in `runner/channel.py` this is no longer fatal:
-        # whatever frames already landed are dispatched; the runner will
-        # reopen the channel and resume. Log at info, not exception.
+        # The runner closed its end mid-stream. Distinguish the empty-body
+        # case (499, nginx "client closed request" convention) from the
+        # partial-progress case (204, frames were dispatched). The runner's
+        # reconnect loop in `runner/channel.py` makes this non-fatal either
+        # way.
         _diag(
             f"B-DIAG-EVENTS EVENTS RX DISCONNECT: session_id={sid} "
             f"bytes={total_bytes} chunks={chunk_count} frames={count}"
         )
-        return JSONResponse(
-            content={"received": count, "disconnected": True},
-            status_code=status.HTTP_202_ACCEPTED,
-        )
+        if count == 0:
+            return Response(status_code=499)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     _diag(
         f"B-DIAG-EVENTS EVENTS RX CLOSE: session_id={sid} "

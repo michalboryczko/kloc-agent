@@ -162,6 +162,61 @@ async def test_run_error_for_stale_run_does_not_wipe_active_mapping() -> None:
     assert req.app.state.active_run_by_session.get("s1") == "rB"
 
 
+class _FakeStreamRequest:
+    """Mock Request for `ingest_runner_events`: supplies a stream that yields
+    `chunks` and then raises ClientDisconnect to simulate runner half-close."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        bus = _FakeBus()
+
+        class _State:
+            runner_registry = None
+            event_bus = bus
+            active_run_by_session: dict[str, str] = {}
+            pending_pre_run_started: dict[str, list[dict]] = {}
+
+        class _App:
+            state = _State()
+
+        self.app = _App()
+
+    async def stream(self):
+        from starlette.requests import ClientDisconnect
+
+        for c in self._chunks:
+            yield c
+        raise ClientDisconnect()
+
+
+async def test_client_disconnect_returns_499_when_no_frames() -> None:
+    """Empty-body disconnect: runner opened the channel and dropped before
+    sending any frame. Return 499 (nginx 'client closed request')."""
+    import uuid as _uuid
+
+    from src.api.internal import ingest_runner_events
+
+    req = _FakeStreamRequest(chunks=[])
+    sid = _uuid.uuid4()
+    resp = await ingest_runner_events(session_id=sid, request=req)  # type: ignore[arg-type]
+    assert resp.status_code == 499
+
+
+async def test_client_disconnect_returns_204_when_some_frames() -> None:
+    """Partial-progress disconnect: at least one frame landed before the
+    runner half-closed. Return 204 (no content; frames already accepted)."""
+    import json
+    import uuid as _uuid
+
+    from src.api.internal import ingest_runner_events
+
+    frame = json.dumps({"type": "RUN_STARTED", "runId": "r1"}).encode() + b"\n"
+    req = _FakeStreamRequest(chunks=[frame])
+    sid = _uuid.uuid4()
+    resp = await ingest_runner_events(session_id=sid, request=req)  # type: ignore[arg-type]
+    assert resp.status_code == 204
+
+
 async def test_stale_run_finished_does_not_orphan_subsequent_b_frame() -> None:
     """End-to-end ISS-04 scenario: stale RUN_FINISHED(rA) arrives while
     run B is active on session s1; the following intermediate frame
