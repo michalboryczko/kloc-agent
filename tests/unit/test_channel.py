@@ -61,3 +61,232 @@ async def test_emit_does_not_block_on_idle_queue() -> None:
     )
     await chan.emit({"type": "RUN_STARTED"})
     assert chan._outbound.qsize() == 1
+
+
+# ---------------------------------------------------------------------------
+# ISS-06 regression: mid-emit transport exception loses the in-flight frame
+# unless _stream_outbound prepends `last_inflight` to pending_after_break.
+# ---------------------------------------------------------------------------
+
+
+import json  # noqa: E402
+
+import httpx  # noqa: E402
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int = 200) -> None:
+        self.status_code = status_code
+
+
+class _FakeStreamCM:
+    """Async CM standing in for `httpx.AsyncClient.stream(...)`.
+
+    Two modes, selected per construction:
+      * ``raise_after=N`` — advance the body iterator ``N`` times into
+        ``collected``, then raise ``RemoteProtocolError`` from
+        ``__aenter__`` (simulating mid-emit transport reset).
+      * ``raise_after=None`` — drain the body iterator to completion
+        into ``collected`` and return normally. If ``terminate_with``
+        is provided, push it onto the outbound queue first so a body
+        iter blocked on ``.get()`` unblocks via the ``None`` sentinel.
+    """
+
+    def __init__(
+        self,
+        body_iter,
+        collected: list[bytes],
+        raise_after: int | None,
+        terminate_queue=None,
+    ) -> None:
+        self._body = body_iter
+        self._collected = collected
+        self._raise_after = raise_after
+        self._terminate_queue = terminate_queue
+
+    async def __aenter__(self) -> _FakeResponse:
+        if self._raise_after is not None:
+            for _ in range(self._raise_after):
+                line = await self._body.__anext__()
+                self._collected.append(line)
+            raise httpx.RemoteProtocolError("simulated mid-emit reset")
+        if self._terminate_queue is not None:
+            # Push the sentinel BEFORE iterating so the body iter
+            # returns naturally once pending_after_break is drained.
+            self._terminate_queue.put_nowait(None)
+        async for line in self._body:
+            self._collected.append(line)
+        return _FakeResponse(status_code=200)
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class _FakeHttp:
+    """Stand-in for ``httpx.AsyncClient`` exposing only ``.stream``.
+
+    Each call constructs a fresh ``_FakeStreamCM`` driven by the
+    ``attempts`` script: attempt 0 uses ``attempts[0]`` etc. After the
+    script is exhausted any further calls raise — exposes accidental
+    extra reconnects in the test.
+    """
+
+    def __init__(self, attempts: list[dict], chan=None) -> None:
+        # attempts[i] = {
+        #   "raise_after": int|None,
+        #   "collected":   list[bytes],
+        #   "terminate":   bool,  # push None sentinel into chan._outbound
+        # }
+        self._attempts = attempts
+        self._call_index = 0
+        self._chan = chan
+
+    def stream(self, method, url, *, content, headers, timeout):
+        if self._call_index >= len(self._attempts):
+            raise AssertionError(
+                f"unexpected reconnect attempt #{self._call_index + 1}"
+            )
+        spec = self._attempts[self._call_index]
+        self._call_index += 1
+        terminate_queue = (
+            self._chan._outbound
+            if (spec.get("terminate") and self._chan is not None)
+            else None
+        )
+        return _FakeStreamCM(
+            body_iter=content,
+            collected=spec["collected"],
+            raise_after=spec["raise_after"],
+            terminate_queue=terminate_queue,
+        )
+
+
+def _decode_lines(lines: list[bytes]) -> list[dict]:
+    return [json.loads(b.rstrip(b"\n")) for b in lines]
+
+
+async def test_reconnect_replays_last_inflight_frame() -> None:
+    """A frame yielded by body_iter on the first attempt but lost when
+    the transport raises mid-block must be re-sent at the head of the
+    second attempt — otherwise RUN_FINISHED can vanish (ISS-06)."""
+    from runner.channel import BackendChannel
+
+    chan = BackendChannel(
+        backend_url="http://unused",
+        session_id="s1",
+        runner_id="r1",
+        run_id_provider=lambda: "run1",
+    )
+
+    e1 = {"type": "TEXT_MESSAGE_CONTENT", "delta": "hi"}
+    e2 = {"type": "TEXT_MESSAGE_END"}
+    e3 = {"type": "RUN_FINISHED"}
+    await chan._outbound.put(e1)
+    await chan._outbound.put(e2)
+    await chan._outbound.put(e3)
+
+    first: list[bytes] = []
+    second: list[bytes] = []
+    chan._http = _FakeHttp(
+        attempts=[
+            {"raise_after": 1, "collected": first},
+            {"raise_after": None, "collected": second, "terminate": True},
+        ],
+        chan=chan,
+    )
+
+    # Skip the backoff sleep so the test is fast. Capture the real
+    # sleep BEFORE patching so the replacement does not recurse.
+    real_sleep = asyncio.sleep
+
+    async def _instant_sleep(_):
+        await real_sleep(0)
+
+    import runner.channel as _channel_mod
+
+    orig_sleep = _channel_mod.asyncio.sleep
+    _channel_mod.asyncio.sleep = _instant_sleep  # type: ignore[assignment]
+    try:
+        await asyncio.wait_for(chan._stream_outbound(), timeout=5.0)
+    finally:
+        _channel_mod.asyncio.sleep = orig_sleep  # type: ignore[assignment]
+
+    # Attempt 1 yielded exactly e1 before the simulated reset.
+    assert _decode_lines(first) == [e1]
+    # Attempt 2: e1 must be replayed at the head, then e2, e3.
+    decoded = _decode_lines(second)
+    assert decoded[0]["type"] == "TEXT_MESSAGE_CONTENT"
+    assert decoded == [e1, e2, e3]
+
+
+async def test_clean_shutdown_does_not_resend_last_frame() -> None:
+    """A normal None-sentinel close must not re-send the last frame on a
+    later reconnect (there is no later reconnect — the function exits)."""
+    from runner.channel import BackendChannel
+
+    chan = BackendChannel(
+        backend_url="http://unused",
+        session_id="s1",
+        runner_id="r1",
+        run_id_provider=lambda: "run1",
+    )
+    only = {"type": "RUN_FINISHED"}
+    await chan._outbound.put(only)
+    await chan._outbound.put(None)
+
+    collected: list[bytes] = []
+    chan._http = _FakeHttp(
+        attempts=[{"raise_after": None, "collected": collected}],
+        chan=chan,
+    )
+
+    await asyncio.wait_for(chan._stream_outbound(), timeout=5.0)
+
+    assert _decode_lines(collected) == [only]
+
+
+async def test_reconnect_preserves_order_when_inflight_and_queue_both_present() -> None:
+    """When the transport raises after the first frame, the second
+    attempt's body must yield in order: in-flight frame (E1), then the
+    drained queue (E2, E3). No frame is dropped or reordered."""
+    from runner.channel import BackendChannel
+
+    chan = BackendChannel(
+        backend_url="http://unused",
+        session_id="s1",
+        runner_id="r1",
+        run_id_provider=lambda: "run1",
+    )
+    e1 = {"type": "E1"}
+    e2 = {"type": "E2"}
+    e3 = {"type": "E3"}
+    await chan._outbound.put(e1)
+    await chan._outbound.put(e2)
+    await chan._outbound.put(e3)
+
+    first: list[bytes] = []
+    second: list[bytes] = []
+    chan._http = _FakeHttp(
+        attempts=[
+            {"raise_after": 1, "collected": first},
+            {"raise_after": None, "collected": second, "terminate": True},
+        ],
+        chan=chan,
+    )
+
+    import runner.channel as _channel_mod
+
+    real_sleep = asyncio.sleep
+
+    async def _instant_sleep(_):
+        await real_sleep(0)
+
+    orig_sleep = _channel_mod.asyncio.sleep
+    _channel_mod.asyncio.sleep = _instant_sleep  # type: ignore[assignment]
+    try:
+        await asyncio.wait_for(chan._stream_outbound(), timeout=5.0)
+    finally:
+        _channel_mod.asyncio.sleep = orig_sleep  # type: ignore[assignment]
+
+    assert _decode_lines(first) == [e1]
+    assert _decode_lines(second) == [e1, e2, e3]
