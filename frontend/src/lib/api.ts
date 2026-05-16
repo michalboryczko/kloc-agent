@@ -58,13 +58,13 @@ export type MessagesPage = {
  * raw status and body so callers can differentiate (e.g., 404 vs 500).
  */
 export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly body: string,
-    message?: string,
-  ) {
+  readonly status: number;
+  readonly body: string;
+  constructor(status: number, body: string, message?: string) {
     super(message ?? `kloc-agent ${status}: ${body || "request failed"}`);
     this.name = "ApiError";
+    this.status = status;
+    this.body = body;
   }
 }
 
@@ -74,9 +74,11 @@ export class ApiError extends Error {
  * the UI surface differs: "network unreachable" vs "backend rejected".
  */
 export class NetworkError extends Error {
-  constructor(message: string, public readonly cause?: unknown) {
+  readonly cause?: unknown;
+  constructor(message: string, cause?: unknown) {
     super(message);
     this.name = "NetworkError";
+    this.cause = cause;
   }
 }
 
