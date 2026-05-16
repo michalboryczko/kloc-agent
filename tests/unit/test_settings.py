@@ -375,3 +375,27 @@ def test_env_example_has_no_kloc_runner_mode_entry() -> None:
     env_example = Path(__file__).resolve().parents[2] / ".env.example"
     text = env_example.read_text()
     assert "KLOC_RUNNER_MODE" not in text
+
+
+def test_diag_events_defaults_to_false(monkeypatch, tmp_path) -> None:
+    """Per-frame stderr diagnostics must be opt-in. Default off prevents a
+    sync-stderr write on every AG-UI event in production."""
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.delenv("KLOC_DIAG_EVENTS", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.diag_events is False
+
+
+def test_diag_events_can_be_enabled_via_env(monkeypatch, tmp_path) -> None:
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.setenv("KLOC_DIAG_EVENTS", "true")
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.diag_events is True

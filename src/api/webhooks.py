@@ -52,10 +52,10 @@ log = logging.getLogger("kloc_agent.webhooks")
 
 
 def _diag(msg: str) -> None:
-    """B-DIAG-AUTH diagnostic emitter — writes directly to stderr to
-    bypass uvicorn's --log-config which silently filters `kloc_agent.*`
-    INFO records in the container image. Same shape as
-    `src/api/internal.py:_diag`; consolidate later if it survives."""
+    """Off by default. Direct stderr bypasses uvicorn's --log-config
+    which can filter `kloc_agent.*` INFO records in some images."""
+    if not get_settings().diag_events:
+        return
     print(msg, file=sys.stderr, flush=True)
 
 

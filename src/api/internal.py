@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 import uuid
 from typing import Any
@@ -29,24 +28,17 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 from starlette.requests import ClientDisconnect
 
+from src.settings import get_settings
+
 
 router = APIRouter(tags=["internal"])
 log = logging.getLogger("kloc_agent.internal")
 
 
-# Per-frame diagnostic emit is gated by an env var so production
-# traffic does not incur a sync-stderr write on every AG-UI event
-# (which blocks the event loop and floods stderr at moderate
-# throughput). Set KLOC_DIAG_EVENTS=1 in dev/CI to enable.
-_DIAG_ENABLED = bool(os.environ.get("KLOC_DIAG_EVENTS"))
-
-
 def _diag(msg: str) -> None:
-    """Diagnostic emitter -- writes directly to stderr to bypass
-    uvicorn's --log-config which can silently filter `kloc_agent.*`
-    INFO records in some container images. stderr is never filtered
-    by uvicorn. Gated by KLOC_DIAG_EVENTS so it is off by default."""
-    if not _DIAG_ENABLED:
+    """Off by default. Direct stderr bypasses uvicorn's --log-config
+    which can filter `kloc_agent.*` INFO records in some images."""
+    if not get_settings().diag_events:
         return
     print(msg, file=sys.stderr, flush=True)
 

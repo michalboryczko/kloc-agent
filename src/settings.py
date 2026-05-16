@@ -129,6 +129,17 @@ class Settings(BaseSettings):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
 
+    diag_events: bool = Field(
+        default=False,
+        validation_alias="KLOC_DIAG_EVENTS",
+        description=(
+            "When true, the per-frame stderr diagnostic emitters in the "
+            "JSONL ingress and HMAC webhook receiver are activated. Off "
+            "by default so production traffic does not pay a sync-stderr "
+            "write per AG-UI event."
+        ),
+    )
+
     allow_hmac_fallback: bool = Field(
         default=False,
         description=(
