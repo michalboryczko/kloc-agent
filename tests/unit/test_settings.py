@@ -222,6 +222,59 @@ def test_hmac_fallback_disabled_with_default_secret_ok(
     assert s.allow_hmac_fallback is False
 
 
+@pytest.mark.parametrize(
+    "allow_fallback,secret,stub_mode,should_raise",
+    [
+        # (allow_hmac_fallback, kloc_hook_secret, stub_mode) -> raise?
+        # The 3-AND predicate fires only when all three "risk" inputs are
+        # set: fallback ON, secret is the well-known default, and stub
+        # mode is OFF. Flipping ANY one of those off must permit boot.
+        (True, "dev-secret-please-rotate", False, True),
+        (True, "dev-secret-please-rotate", True, False),
+        (True, "rotated-secret-xyz", False, False),
+        (True, "rotated-secret-xyz", True, False),
+        (False, "dev-secret-please-rotate", False, False),
+        (False, "dev-secret-please-rotate", True, False),
+        (False, "rotated-secret-xyz", False, False),
+        (False, "rotated-secret-xyz", True, False),
+    ],
+)
+def test_hmac_fallback_truth_table(
+    monkeypatch, tmp_path, allow_fallback, secret, stub_mode, should_raise
+) -> None:
+    """Exhaustive 2x2x2 coverage of the 3-AND predicate. Any future
+    drift (e.g. `and` -> `or`) is caught by at least one cell."""
+    from pydantic import ValidationError
+
+    from src.settings import Settings
+
+    if stub_mode:
+        monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    else:
+        monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
+        # Provider key must be present so the provider-key validator
+        # does not raise first and mask the HMAC fallback check.
+        monkeypatch.setenv("GEMINI_API_KEY", "stub-key-for-test")
+    monkeypatch.chdir(tmp_path)
+
+    if should_raise:
+        with pytest.raises((ValidationError, ValueError)):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                kloc_hook_secret=secret,
+                allow_hmac_fallback=allow_fallback,
+            )
+    else:
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            kloc_hook_secret=secret,
+            allow_hmac_fallback=allow_fallback,
+        )
+        assert s.allow_hmac_fallback is allow_fallback
+        assert s.kloc_hook_secret == secret
+        assert s.stub_mode is stub_mode
+
+
 def test_hmac_fallback_error_message_names_both_env_vars(
     monkeypatch, tmp_path
 ) -> None:
