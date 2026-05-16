@@ -141,29 +141,39 @@ class BackendChannel:
         # of each new stream attempt.
         pending_after_break: list[dict] = []
 
-        # The most recently yielded event. A yielded line is at-best
-        # buffered in-process by httpx and may be lost across the TCP
-        # boundary if the stream raises mid-emit. On reconnect we
-        # prepend it to pending_after_break so it is re-sent at the
-        # head of the next stream. Over-delivery is preferable to silent
-        # loss (terminal frames like RUN_FINISHED otherwise vanish);
-        # the backend tolerates duplicate AG-UI intermediates.
-        last_inflight: dict | None = None
+        # Frames yielded into httpx during the CURRENT attempt. Buffered
+        # so a transport failure or rejecting status code can replay them
+        # all on the next attempt -- not just the most recent one. Any
+        # frame yielded into httpx but not yet acknowledged by the
+        # backend is at risk of loss across the TCP boundary, so we
+        # treat them ALL as in-flight until the attempt terminates
+        # successfully. Reset to empty when a fresh body_iter starts.
+        # Over-delivery is preferable to silent loss (terminal frames
+        # like RUN_FINISHED otherwise vanish); the backend tolerates
+        # duplicate AG-UI intermediates.
+        yielded_this_attempt: list[dict] = []
 
         async def body_iter():
-            nonlocal last_inflight
-            # Replay anything we held aside while the channel was down.
-            for event in pending_after_break:
-                last_inflight = event
+            yielded_this_attempt.clear()
+            # Drain the cross-attempt buffer first. Pop AFTER recording
+            # the event in `yielded_this_attempt` and BEFORE the yield,
+            # so an exception raised by the consumer mid-yield still
+            # leaves the frame visible to recovery. The pop must come
+            # before the yield as well: if it ran after, an exception
+            # mid-replay would leave the frame in BOTH
+            # pending_after_break AND yielded_this_attempt and the
+            # recovery would duplicate it on the next attempt (WR-04).
+            while pending_after_break:
+                event = pending_after_break.pop(0)
+                yielded_this_attempt.append(event)
                 line = (json.dumps(event) + "\n").encode("utf-8")
                 yield line
-            pending_after_break.clear()
 
             while True:
                 event = await self._outbound.get()
                 if event is None:
                     return
-                last_inflight = event
+                yielded_this_attempt.append(event)
                 line = (json.dumps(event) + "\n").encode("utf-8")
                 log.info(
                     "CHANNEL SEND: type=%s bytes=%d",
@@ -199,13 +209,28 @@ class BackendChannel:
                             "channel.outbound_bad_status",
                             extra={"status": response.status_code},
                         )
-                        # 4xx/5xx: backend did not consume the body, so
-                        # the most recently yielded frame is also at risk
-                        # of loss. Prepend it before backing off.
-                        if last_inflight is not None:
-                            pending_after_break.append(last_inflight)
-                            last_inflight = None
-                        # 4xx/5xx: don't tight-loop; back off and retry.
+                        # 4xx/5xx: backend rejected this attempt. Every
+                        # frame body_iter yielded during this attempt is
+                        # at risk of loss across the TCP boundary, so
+                        # prepend the WHOLE attempt transcript -- not
+                        # just the most recent one (CR-02). Then also
+                        # drain whatever is still queued so the next
+                        # attempt's body_iter replays everything in
+                        # order: yielded-but-unacknowledged first, then
+                        # queue tail.
+                        pending_after_break[:0] = yielded_this_attempt
+                        yielded_this_attempt.clear()
+                        while True:
+                            try:
+                                event = self._outbound.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+                            if event is None:
+                                sentinel_seen = True
+                                break
+                            pending_after_break.append(event)
+                        if sentinel_seen:
+                            return
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, max_backoff)
                         continue
@@ -216,14 +241,14 @@ class BackendChannel:
                 raise
             except Exception:
                 log.exception("channel.outbound_failed; reconnecting")
-                # The most recently yielded frame may have been buffered
-                # by httpx but never flushed across the TCP boundary.
-                # Prepend it BEFORE draining the queue so order is
-                # preserved on the next attempt: in-flight first, then
-                # whatever was queued after it.
-                if last_inflight is not None:
-                    pending_after_break.append(last_inflight)
-                    last_inflight = None
+                # Any frame yielded into httpx during this attempt may
+                # have been buffered but never flushed across the TCP
+                # boundary. Prepend the WHOLE attempt transcript (not
+                # just the most recent one) BEFORE draining the queue so
+                # order is preserved on the next attempt: yielded-but-
+                # unacknowledged first, then whatever was queued after.
+                pending_after_break[:0] = yielded_this_attempt
+                yielded_this_attempt.clear()
                 # Drain any events queued while the stream was broken;
                 # the next body_iter will replay them.
                 while True:

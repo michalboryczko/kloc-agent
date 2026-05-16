@@ -245,6 +245,192 @@ async def test_clean_shutdown_does_not_resend_last_frame() -> None:
     assert _decode_lines(collected) == [only]
 
 
+# ---------------------------------------------------------------------------
+# CR-02 regression: the >= 400 status branch must apply the same drain +
+# prepend pattern as the exception branch. Pre-fix code only prepended
+# `last_inflight`, leaving any earlier-yielded frames lost on the next
+# attempt because body_iter had already pulled them off `_outbound`.
+# ---------------------------------------------------------------------------
+
+
+class _BadStatusStreamCM:
+    """Async CM whose `__aenter__` advances the body iterator some number
+    of times and then returns a `>= 400` response without raising. This
+    simulates the 4xx/5xx path that CR-02 was about (e.g. a transient 503
+    during backend startup, a 404 mid-redeploy)."""
+
+    def __init__(
+        self,
+        body_iter,
+        collected: list[bytes],
+        advance: int,
+        status_code: int = 503,
+    ) -> None:
+        self._body = body_iter
+        self._collected = collected
+        self._advance = advance
+        self._status_code = status_code
+
+    async def __aenter__(self) -> _FakeResponse:
+        for _ in range(self._advance):
+            line = await self._body.__anext__()
+            self._collected.append(line)
+        return _FakeResponse(status_code=self._status_code)
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class _MixedHttp:
+    """Like _FakeHttp but a per-attempt mode: 'bad_status' (CR-02) or
+    'ok' (clean shutdown)."""
+
+    def __init__(self, attempts: list[dict], chan=None) -> None:
+        self._attempts = attempts
+        self._call_index = 0
+        self._chan = chan
+
+    def stream(self, method, url, *, content, headers, timeout):
+        if self._call_index >= len(self._attempts):
+            raise AssertionError(
+                f"unexpected reconnect attempt #{self._call_index + 1}"
+            )
+        spec = self._attempts[self._call_index]
+        self._call_index += 1
+        mode = spec["mode"]
+        if mode == "bad_status":
+            return _BadStatusStreamCM(
+                body_iter=content,
+                collected=spec["collected"],
+                advance=spec["advance"],
+                status_code=spec.get("status_code", 503),
+            )
+        if mode == "ok":
+            terminate_queue = (
+                self._chan._outbound
+                if (spec.get("terminate") and self._chan is not None)
+                else None
+            )
+            return _FakeStreamCM(
+                body_iter=content,
+                collected=spec["collected"],
+                raise_after=None,
+                terminate_queue=terminate_queue,
+            )
+        raise AssertionError(f"unknown mode {mode!r}")
+
+
+async def test_4xx_response_drains_outbound_and_replays_all_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR-02 regression: on a >= 400 response after body_iter has
+    yielded multiple frames, the recovery branch must drain whatever is
+    still on `_outbound` AND prepend `last_inflight`, so every frame
+    re-appears in order on the next attempt. Pre-fix the branch only
+    prepended last_inflight, silently dropping frames yielded earlier."""
+    from runner.channel import BackendChannel
+
+    chan = BackendChannel(
+        backend_url="http://unused",
+        session_id="s1",
+        runner_id="r1",
+        run_id_provider=lambda: "run1",
+    )
+    e1 = {"type": "TEXT_MESSAGE_CONTENT", "delta": "hi"}
+    e2 = {"type": "TEXT_MESSAGE_END"}
+    e3 = {"type": "RUN_FINISHED"}
+    # Three frames queued upfront. Attempt 1 advances body_iter twice
+    # (yielding e1 and e2) before the backend returns 503. With the
+    # pre-fix code, only e2 would have been preserved (as last_inflight)
+    # and e1 would be irrecoverable on attempt 2. Post-fix attempt 2
+    # must yield [e1, e2, e3] in that order — and ONLY once each.
+    await chan._outbound.put(e1)
+    await chan._outbound.put(e2)
+    await chan._outbound.put(e3)
+
+    first: list[bytes] = []
+    second: list[bytes] = []
+    chan._http = _MixedHttp(  # type: ignore[assignment]
+        attempts=[
+            {
+                "mode": "bad_status",
+                "advance": 2,
+                "collected": first,
+                "status_code": 503,
+            },
+            {
+                "mode": "ok",
+                "collected": second,
+                "terminate": True,
+            },
+        ],
+        chan=chan,
+    )
+
+    real_sleep = asyncio.sleep
+
+    async def _instant_sleep(_):
+        await real_sleep(0)
+
+    monkeypatch.setattr("runner.channel.asyncio.sleep", _instant_sleep)
+
+    await asyncio.wait_for(chan._stream_outbound(), timeout=5.0)
+
+    # Attempt 1 yielded exactly two frames before the 503.
+    assert _decode_lines(first) == [e1, e2]
+    # Attempt 2: pre-fix would be [e2, e3] (e1 gone). Post-fix preserves
+    # all three frames in order.
+    decoded = _decode_lines(second)
+    assert decoded == [e1, e2, e3], (
+        f"4xx recovery lost frames; expected [e1,e2,e3] got "
+        f"{[d.get('type') for d in decoded]}"
+    )
+
+
+async def test_4xx_then_sentinel_does_not_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `None` sentinel encountered while draining the queue inside the
+    4xx recovery branch must terminate the stream loop, not retry."""
+    from runner.channel import BackendChannel
+
+    chan = BackendChannel(
+        backend_url="http://unused",
+        session_id="s1",
+        runner_id="r1",
+        run_id_provider=lambda: "run1",
+    )
+    e1 = {"type": "TEXT_MESSAGE_CONTENT", "delta": "hi"}
+    await chan._outbound.put(e1)
+    await chan._outbound.put(None)  # graceful close requested
+
+    first: list[bytes] = []
+    chan._http = _MixedHttp(  # type: ignore[assignment]
+        attempts=[
+            {
+                "mode": "bad_status",
+                "advance": 1,
+                "collected": first,
+                "status_code": 503,
+            },
+        ],
+        chan=chan,
+    )
+
+    real_sleep = asyncio.sleep
+
+    async def _instant_sleep(_):
+        await real_sleep(0)
+
+    monkeypatch.setattr("runner.channel.asyncio.sleep", _instant_sleep)
+
+    # If the loop didn't honour the sentinel during drain it would call
+    # `_http.stream` a second time and trigger _MixedHttp's
+    # AssertionError. The test passes when the call returns cleanly.
+    await asyncio.wait_for(chan._stream_outbound(), timeout=5.0)
+    assert _decode_lines(first) == [e1]
+
+
 async def test_reconnect_preserves_order_when_inflight_and_queue_both_present() -> None:
     """When the transport raises after the first frame, the second
     attempt's body must yield in order: in-flight frame (E1), then the
