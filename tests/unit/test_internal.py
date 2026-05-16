@@ -119,3 +119,73 @@ async def test_run_started_publishes_before_buffered_orphans() -> None:
     assert deltas == ["a", "b"]
     # Buffer is cleared after flush.
     assert not req.app.state.pending_pre_run_started.get("s1")
+
+
+async def test_run_finished_for_current_run_clears_active_mapping() -> None:
+    """ISS-04 baseline: a RUN_FINISHED whose runId matches the active run
+    for the session SHOULD clear the active mapping. CAS guard must not
+    over-correct and prevent normal end-of-run cleanup.
+    """
+    from src.api.internal import _dispatch_frame
+
+    req, _bus = _make_request()
+    req.app.state.active_run_by_session = {"s1": "rA"}
+    await _dispatch_frame(req, "s1", {"type": "RUN_FINISHED", "runId": "rA"})
+
+    assert "s1" not in req.app.state.active_run_by_session
+
+
+async def test_run_finished_for_stale_run_does_not_wipe_active_mapping() -> None:
+    """ISS-04 (High): a late RUN_FINISHED for run A arriving after run B's
+    RUN_STARTED already took over the session must NOT pop the mapping
+    for B. Without the CAS guard, the unconditional pop wipes B's
+    routing key and any subsequent intermediate B-frame would be
+    misrouted as an orphan.
+    """
+    from src.api.internal import _dispatch_frame
+
+    req, _bus = _make_request()
+    req.app.state.active_run_by_session = {"s1": "rB"}
+    await _dispatch_frame(req, "s1", {"type": "RUN_FINISHED", "runId": "rA"})
+
+    assert req.app.state.active_run_by_session.get("s1") == "rB"
+
+
+async def test_run_error_for_stale_run_does_not_wipe_active_mapping() -> None:
+    """Same CAS guarantee for RUN_ERROR as for RUN_FINISHED."""
+    from src.api.internal import _dispatch_frame
+
+    req, _bus = _make_request()
+    req.app.state.active_run_by_session = {"s1": "rB"}
+    await _dispatch_frame(req, "s1", {"type": "RUN_ERROR", "runId": "rA"})
+
+    assert req.app.state.active_run_by_session.get("s1") == "rB"
+
+
+async def test_stale_run_finished_does_not_orphan_subsequent_b_frame() -> None:
+    """End-to-end ISS-04 scenario: stale RUN_FINISHED(rA) arrives while
+    run B is active on session s1; the following intermediate frame
+    (no runId on the wire) must route via active_run_by_session and be
+    published under rB, NOT buffered as a (spurious) orphan.
+    """
+    from src.api.internal import _dispatch_frame
+
+    req, bus = _make_request()
+    req.app.state.active_run_by_session = {"s1": "rB"}
+
+    await _dispatch_frame(req, "s1", {"type": "RUN_FINISHED", "runId": "rA"})
+    await _dispatch_frame(
+        req, "s1", {"type": "TEXT_MESSAGE_CONTENT", "delta": "hi"}
+    )
+
+    # The intermediate frame must publish under rB.
+    routed = [
+        (sid, rid, f)
+        for sid, rid, f in bus.published
+        if f.get("type") == "TEXT_MESSAGE_CONTENT"
+    ]
+    assert routed, "intermediate TEXT_MESSAGE_CONTENT was not published"
+    assert routed[0][0] == "s1"
+    assert routed[0][1] == "rB"
+    # And it must NOT have landed in the orphan buffer.
+    assert not req.app.state.pending_pre_run_started.get("s1")
