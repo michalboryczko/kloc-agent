@@ -65,10 +65,17 @@ async def stream_post(
             detail=f"invalid session_id {session_id!r} — must be a UUID",
         )
 
+    # Fail fast on registry unavailability (lifespan boot failure)
+    # BEFORE persisting the user message. Otherwise we end up with a
+    # half-committed transaction: user message persisted, runner never
+    # spawned; retry would replay the message via `prior_messages` in
+    # the next hydration and the user sees their own input duplicated
+    # (WR-03). Persistence still happens BEFORE forwarding to the runner
+    # (Contract A invariant #1), just AFTER the registry health check.
+    registry = _get_runner_registry(request)
+
     # Contract A #1: persist user message + commit BEFORE forwarding.
     await _persist_user_message(session_uuid, messages)
-
-    registry = _get_runner_registry(request)
     hydration_payload = await _build_hydration_payload(
         session_id=session_id,
         session_uuid=session_uuid,
@@ -84,53 +91,64 @@ async def stream_post(
     # is in `_subs` when the runner's first event lands.
     queue = await event_bus.register(session_id, run_id)
 
-    # Forward the new user message to the runner via the inbox queue.
-    await entry.inbox.put(
-        {
-            "type": "user_message",
-            "run_id": run_id,
-            "messages": messages,
-        }
-    )
+    # Anything that raises between register and the StreamingResponse
+    # actually iterating the generator leaks `queue` into `_subs`
+    # forever (consume's finally never runs). Cleanup via unregister
+    # on every error path before re-raising.
+    try:
+        # Forward the new user message to the runner via the inbox queue.
+        await entry.inbox.put(
+            {
+                "type": "user_message",
+                "run_id": run_id,
+                "messages": messages,
+            }
+        )
 
-    # ISS-02: dedup persister spawn by (session_id, run_id). Two concurrent
-    # POST /stream calls for the same in-flight run must NOT subscribe two
-    # persisters onto the same bus topic — that double-counts every event
-    # in the execution ring and races two `message_uuid` dicts on the first
-    # delta. The bus already supports many SSE subscribers per topic, so the
-    # second caller still gets a fresh `event_bus.consume` over the same
-    # queue it just registered above; only the persister is shared.
-    execution = await execution_registry.get_or_create(session_id, run_id)
+        # ISS-02: dedup persister spawn by (session_id, run_id). Two
+        # concurrent POST /stream calls for the same in-flight run must
+        # NOT subscribe two persisters onto the same bus topic — that
+        # double-counts every event in the execution ring and races two
+        # `message_uuid` dicts on the first delta. The bus already
+        # supports many SSE subscribers per topic, so the second caller
+        # still gets a fresh `event_bus.consume` over the same queue it
+        # just registered above; only the persister is shared.
+        execution = await execution_registry.get_or_create(
+            session_id, run_id
+        )
 
-    persist_tasks = getattr(request.app.state, "persist_tasks", None)
-    if persist_tasks is None or not isinstance(persist_tasks, dict):
-        persist_tasks = {}
-        request.app.state.persist_tasks = persist_tasks
+        persist_tasks = getattr(request.app.state, "persist_tasks", None)
+        if persist_tasks is None or not isinstance(persist_tasks, dict):
+            persist_tasks = {}
+            request.app.state.persist_tasks = persist_tasks
 
-    key = (session_id, run_id)
-    existing = persist_tasks.get(key)
-    if existing is None or existing.done():
-        persist_task = asyncio.create_task(
-            _persist_events(
-                session_id=session_id,
-                session_uuid=session_uuid,
-                run_id=run_id,
-                execution=execution,
+        key = (session_id, run_id)
+        existing = persist_tasks.get(key)
+        if existing is None or existing.done():
+            persist_task = asyncio.create_task(
+                _persist_events(
+                    session_id=session_id,
+                    session_uuid=session_uuid,
+                    run_id=run_id,
+                    execution=execution,
+                )
             )
-        )
-        persist_task.add_done_callback(_log_persist_task_result)
-        persist_tasks[key] = persist_task
-        persist_task.add_done_callback(
-            lambda t, k=key, d=persist_tasks: d.pop(k, None)
-        )
+            persist_task.add_done_callback(_log_persist_task_result)
+            persist_tasks[key] = persist_task
+            persist_task.add_done_callback(
+                lambda t, k=key, d=persist_tasks: d.pop(k, None)
+            )
 
-    async def generator() -> AsyncIterator[dict]:
-        async for event in event_bus.consume(session_id, run_id, queue):
-            yield event
-            if is_run_lifecycle_terminal(event):
-                return
+        async def generator() -> AsyncIterator[dict]:
+            async for event in event_bus.consume(session_id, run_id, queue):
+                yield event
+                if is_run_lifecycle_terminal(event):
+                    return
 
-    return make_response(request, generator())
+        return make_response(request, generator())
+    except BaseException:
+        await event_bus.unregister(session_id, run_id, queue)
+        raise
 
 
 @router.get("/sessions/{session_id}/stream")
