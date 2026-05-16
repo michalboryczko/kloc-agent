@@ -141,9 +141,20 @@ class BackendChannel:
         # of each new stream attempt.
         pending_after_break: list[dict] = []
 
+        # The most recently yielded event. A yielded line is at-best
+        # buffered in-process by httpx and may be lost across the TCP
+        # boundary if the stream raises mid-emit. On reconnect we
+        # prepend it to pending_after_break so it is re-sent at the
+        # head of the next stream. Over-delivery is preferable to silent
+        # loss (terminal frames like RUN_FINISHED otherwise vanish);
+        # the backend tolerates duplicate AG-UI intermediates.
+        last_inflight: dict | None = None
+
         async def body_iter():
+            nonlocal last_inflight
             # Replay anything we held aside while the channel was down.
             for event in pending_after_break:
+                last_inflight = event
                 line = (json.dumps(event) + "\n").encode("utf-8")
                 yield line
             pending_after_break.clear()
@@ -152,6 +163,7 @@ class BackendChannel:
                 event = await self._outbound.get()
                 if event is None:
                     return
+                last_inflight = event
                 line = (json.dumps(event) + "\n").encode("utf-8")
                 log.info(
                     "CHANNEL SEND: type=%s bytes=%d",
@@ -187,6 +199,12 @@ class BackendChannel:
                             "channel.outbound_bad_status",
                             extra={"status": response.status_code},
                         )
+                        # 4xx/5xx: backend did not consume the body, so
+                        # the most recently yielded frame is also at risk
+                        # of loss. Prepend it before backing off.
+                        if last_inflight is not None:
+                            pending_after_break.append(last_inflight)
+                            last_inflight = None
                         # 4xx/5xx: don't tight-loop; back off and retry.
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, max_backoff)
@@ -198,6 +216,14 @@ class BackendChannel:
                 raise
             except Exception:
                 log.exception("channel.outbound_failed; reconnecting")
+                # The most recently yielded frame may have been buffered
+                # by httpx but never flushed across the TCP boundary.
+                # Prepend it BEFORE draining the queue so order is
+                # preserved on the next attempt: in-flight first, then
+                # whatever was queued after it.
+                if last_inflight is not None:
+                    pending_after_break.append(last_inflight)
+                    last_inflight = None
                 # Drain any events queued while the stream was broken;
                 # the next body_iter will replay them.
                 while True:
