@@ -12,7 +12,7 @@
 | # | Phase | Goal | Requirements | Success Criteria |
 |---|-------|------|--------------|------------------|
 | 1 | Backend AG-UI & runner correctness | 4/4 | Complete   | 2026-05-16 |
-| 2 | Backend settings & boot contract | Route all provider config through `Settings`; fail loudly on misconfiguration; remove `stub` runner mode | ISS-05, ISS-07, ISS-12 | 4 |
+| 2 | Backend settings & boot contract | 3/3 | Complete   | 2026-05-16 |
 | 3 | Backend cleanup & comment sweep | Defensive hardening + the 35-file mechanical comment sweep with policy capture | ISS-08, ISS-09, ISS-10, ISS-11, ISS-13 | 5 |
 | 4 | UI foundations & component reskin | Lock design decisions, install styling stack, reskin existing components onto the token theme (no structural change) | UI-P0, UI-P1, UI-P2 | 4 |
 | 5 | UI structural fix, polish, a11y | Replace `<CopilotSidebar>` with inline `<CopilotChat>` + `SessionRail`; ship polish + a11y + dead-code deletion | UI-P3, UI-P4, UI-P5, UI-P6 | 4 |
