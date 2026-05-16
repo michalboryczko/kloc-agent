@@ -36,6 +36,12 @@
 4. Concurrent `RUN_FINISHED` of run A and `RUN_STARTED` of run B for the same session does not wipe B's `active_by_session` mapping; B's first intermediate frame is delivered, not buffered as orphan (unit test asserts the CAS guard)
 5. Runner `channel.py` reconnect after mid-stream transport reset preserves the in-flight yielded frame; `RUN_FINISHED` is never silently lost on a transport-loss path (unit test simulates the reconnect-during-emit scenario)
 
+**Plans:** 4 plans
+- [ ] 01-01-PLAN.md — ISS-01 ordering + ISS-04 CAS guard in src/api/internal.py (regression tests)
+- [ ] 01-02-PLAN.md — ISS-02 persister dedup keyed by (session_id, run_id) in src/api/stream.py (unit + integration regression tests)
+- [ ] 01-03-PLAN.md — ISS-03 drain _after_queue in AuditHookSender.stop() (regression test)
+- [ ] 01-04-PLAN.md — ISS-06 last_inflight prepend on channel reconnect (regression test)
+
 ### Phase 2: Backend settings & boot contract
 **Goal:** Make misconfiguration surface at boot, never inside the runner. Remove the silent-degradation `stub` runner mode. Ensure HMAC fallback cannot use the placeholder secret in production.
 **Requirements:** ISS-05, ISS-07, ISS-12
