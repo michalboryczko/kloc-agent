@@ -59,12 +59,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
 
-    # When unset, the provider-aware default is resolved inside
-    # `_validate_provider_key` so `settings.llm_model_id` is always a
-    # non-empty `str` after construction. An explicit env value wins
-    # over the default regardless of provider.
-    llm_model_id: str | None = Field(
-        default=None,
+    # Empty string sentinel is replaced with a provider-appropriate
+    # default inside `_validate_provider_key`, so consumers can rely on
+    # `settings.llm_model_id` being a non-empty `str` after construction.
+    # The annotation is `str` (not `str | None`) so type-checkers do not
+    # demand redundant None-guards at every call site.
+    llm_model_id: str = Field(
+        default="",
         description=(
             "Concrete model identifier passed into HydrationPayload. "
             "Defaults to a provider-appropriate model when unset "
@@ -179,7 +180,7 @@ class Settings(BaseSettings):
         # unset. Done here (not via a `Field(default_factory=...)`) because
         # the default depends on a *sibling* field (`llm_provider`), which
         # is only available after model construction.
-        if self.llm_model_id is None:
+        if not self.llm_model_id:
             object.__setattr__(
                 self,
                 "llm_model_id",
