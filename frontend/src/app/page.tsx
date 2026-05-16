@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import {
+  ApiError,
+  NetworkError,
   createSession,
   listMessages,
   listSessions,
@@ -23,57 +25,99 @@ type PickedSession = {
   initialMessages: Message[];
 };
 
+function isAbortError(e: unknown): boolean {
+  return (
+    e instanceof DOMException && e.name === "AbortError"
+  ) || (e instanceof Error && e.name === "AbortError");
+}
+
+function formatError(e: unknown): string {
+  if (e instanceof ApiError) {
+    const preview = e.body.length > 120 ? `${e.body.slice(0, 120)}…` : e.body;
+    return `backend ${e.status}: ${preview || e.message}`;
+  }
+  if (e instanceof NetworkError) {
+    return "network unreachable — is the backend running?";
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
 export default function HomePage() {
   const [picked, setPicked] = useState<PickedSession | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  // Tracks the in-flight user-pick fetch (listMessages / createSession) so a
+  // back-navigation or rapid retry cancels the previous request.
+  const pickCtrlRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
     if (picked) return;
-    let cancelled = false;
-    listSessions()
+    const ctrl = new AbortController();
+    listSessions({ signal: ctrl.signal })
       .then((res) => {
-        if (!cancelled) setSessions(res.sessions);
+        setSessions(res.sessions);
       })
       .catch((e: unknown) => {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
+        if (isAbortError(e)) return;
+        setError(formatError(e));
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => ctrl.abort();
   }, [picked]);
+
+  function abortPick() {
+    if (pickCtrlRef.current) {
+      pickCtrlRef.current.abort();
+      pickCtrlRef.current = null;
+    }
+  }
 
   async function pickExisting(s: SessionListItem) {
     setError(null);
+    abortPick();
+    const ctrl = new AbortController();
+    pickCtrlRef.current = ctrl;
     setBusyId(s.id);
     try {
-      const page = await listMessages(s.id, { limit: 500 });
+      const page = await listMessages(s.id, { limit: 500, signal: ctrl.signal });
+      if (ctrl.signal.aborted) return;
       setPicked({ sessionId: s.id, initialMessages: page.messages });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (isAbortError(e)) return;
+      setError(formatError(e));
     } finally {
-      setBusyId(null);
+      if (pickCtrlRef.current === ctrl) {
+        pickCtrlRef.current = null;
+        setBusyId(null);
+      }
     }
   }
 
   async function startNew() {
     setError(null);
+    abortPick();
+    const ctrl = new AbortController();
+    pickCtrlRef.current = ctrl;
     setBusyId("__new__");
     try {
-      const r = await createSession();
+      const r = await createSession({ signal: ctrl.signal });
+      if (ctrl.signal.aborted) return;
       setPicked({ sessionId: r.session_id, initialMessages: [] });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (isAbortError(e)) return;
+      setError(formatError(e));
     } finally {
-      setBusyId(null);
+      if (pickCtrlRef.current === ctrl) {
+        pickCtrlRef.current = null;
+        setBusyId(null);
+      }
     }
   }
 
   function onBack() {
     setError(null);
+    abortPick();
     setPicked(null);
   }
 
