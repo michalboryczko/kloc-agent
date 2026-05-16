@@ -107,41 +107,39 @@ Items observed during review but deferred to the next milestone. Out-of-scope fo
 
 ## Traceability
 
-Updated during roadmap creation.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| ISS-01 | TBD | Pending |
-| ISS-02 | TBD | Pending |
-| ISS-03 | TBD | Pending |
-| ISS-04 | TBD | Pending |
-| ISS-05 | TBD | Pending |
-| ISS-06 | TBD | Pending |
-| ISS-07 | TBD | Pending |
-| ISS-08 | TBD | Pending |
-| ISS-09 | TBD | Pending |
-| ISS-10 | TBD | Pending |
-| ISS-11 | TBD | Pending |
-| ISS-12 | TBD | Pending |
-| ISS-13 | TBD | Pending |
-| UI-P0 | TBD | Pending |
-| UI-P1 | TBD | Pending |
-| UI-P2 | TBD | Pending |
-| UI-P3 | TBD | Pending |
-| UI-P4 | TBD | Pending |
-| UI-P5 | TBD | Pending |
-| UI-P6 | TBD | Pending |
-| FE-PERF | TBD | Pending |
-| FE-BUNDLE | TBD | Pending |
-| FE-ROUTES | TBD | Pending |
-| FE-DATA | TBD | Pending |
-| FE-SEC | TBD | Pending |
-| FE-QUALITY | TBD | Pending |
+| ISS-01 | Phase 1 | Pending |
+| ISS-02 | Phase 1 | Pending |
+| ISS-03 | Phase 1 | Pending |
+| ISS-04 | Phase 1 | Pending |
+| ISS-06 | Phase 1 | Pending |
+| ISS-05 | Phase 2 | Pending |
+| ISS-07 | Phase 2 | Pending |
+| ISS-12 | Phase 2 | Pending |
+| ISS-08 | Phase 3 | Pending |
+| ISS-09 | Phase 3 | Pending |
+| ISS-10 | Phase 3 | Pending |
+| ISS-11 | Phase 3 | Pending |
+| ISS-13 | Phase 3 | Pending |
+| UI-P0 | Phase 4 | Pending |
+| UI-P1 | Phase 4 | Pending |
+| UI-P2 | Phase 4 | Pending |
+| UI-P3 | Phase 5 | Pending |
+| UI-P4 | Phase 5 | Pending |
+| UI-P5 | Phase 5 | Pending |
+| UI-P6 | Phase 5 | Pending |
+| FE-PERF | Phase 6 | Pending |
+| FE-BUNDLE | Phase 6 | Pending |
+| FE-ROUTES | Phase 6 | Pending |
+| FE-DATA | Phase 6 | Pending |
+| FE-SEC | Phase 6 | Pending |
+| FE-QUALITY | Phase 6 | Pending |
 
 **Coverage:**
 - v1 requirements: 26 total
-- Mapped to phases: 0 (populated by roadmap)
-- Unmapped: 26 ⚠️ (will be 0 after roadmap)
+- Mapped to phases: 26 ✓
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-05-16*
