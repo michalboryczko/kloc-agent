@@ -55,13 +55,30 @@ class EventBus:
                     self._subs.pop((session_id, run_id), None)
 
     async def register(
-        self, session_id: str, run_id: str
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        essential: bool = False,
     ) -> asyncio.Queue[dict]:
         """Create + register a queue for `(session_id, run_id)` WITHOUT
         starting to consume. Use this to close the subscribe-after-publish
         race: register the queue first, then trigger the producer, then
-        iterate via `consume`. Returns the queue to pass to `consume`."""
-        q: asyncio.Queue[dict] = asyncio.Queue(maxsize=10_000)
+        iterate via `consume`. Returns the queue to pass to `consume`.
+
+        `essential=True` allocates a queue without a size cap so the
+        slow-subscriber sentinel cannot drop it. Use ONLY for subscribers
+        whose failure causes divergence (the persister: DB rows go
+        missing if it sentinel-drops mid-run). Best-effort subscribers
+        (SSE clients) keep the bounded queue so a stuck client cannot
+        OOM the backend.
+        """
+        if essential:
+            # asyncio.Queue with maxsize=0 is unbounded; `put_nowait`
+            # will never raise QueueFull on this queue.
+            q: asyncio.Queue[dict] = asyncio.Queue()
+        else:
+            q = asyncio.Queue(maxsize=10_000)
         key = (session_id, run_id)
         async with self._lock:
             self._subs[key].add(q)
@@ -108,9 +125,13 @@ class EventBus:
                         self._subs.pop(key, None)
 
     async def subscribe(
-        self, session_id: str, run_id: str
+        self,
+        session_id: str,
+        run_id: str,
+        *,
+        essential: bool = False,
     ) -> AsyncIterator[dict]:
-        q = await self.register(session_id, run_id)
+        q = await self.register(session_id, run_id, essential=essential)
         async for event in self.consume(session_id, run_id, q):
             yield event
 

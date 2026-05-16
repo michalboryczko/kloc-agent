@@ -289,7 +289,16 @@ async def _persist_events(
             float(getattr(settings, "runner_heartbeat_timeout_s", 30)) + 30.0
         )
 
-        bus_iter = event_bus.subscribe(session_id, run_id).__aiter__()
+        # essential=True: the persister gets an unbounded queue so the
+        # slow-subscriber sentinel cannot drop it mid-run. Pre-fix, a
+        # transient DB stall could saturate the persister's 10k-cap
+        # queue, hit the sentinel branch in event_bus.publish, and
+        # silently stop persisting halfway through a run -- divergence
+        # between the SSE client (who saw everything) and the DB (who
+        # only saw the prefix). WR-07.
+        bus_iter = event_bus.subscribe(
+            session_id, run_id, essential=True
+        ).__aiter__()
         try:
             while True:
                 try:
