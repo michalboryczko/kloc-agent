@@ -86,9 +86,11 @@ export function SessionPicker({
                   disabled={busyId !== null}
                   className={cn(
                     "group flex w-full items-start gap-3 px-1 py-3 text-left transition-transform duration-[160ms] ease-[var(--ease-out-snappy)]",
-                    busyId !== null
+                    busyId === s.id
                       ? "cursor-wait"
-                      : "cursor-pointer hover:translate-x-[3px] hover:bg-[var(--bg-1)]",
+                      : busyId !== null
+                        ? "disabled:cursor-not-allowed"
+                        : "cursor-pointer hover:translate-x-[3px] hover:bg-[var(--bg-1)]",
                     "focus:outline-none focus-visible:bg-[var(--bg-1)]",
                   )}
                   aria-busy={busyId === s.id}
