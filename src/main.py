@@ -41,7 +41,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = create_engine_for_settings(settings)
     app.state.engine = engine
 
-    # 2. S3 client (lifespan-managed; research/04 §6.4)
+    # 2. S3 client (lifespan-managed so credentials/connection are
+    #    created once at boot, not per-request).
     session = aioboto3.Session(
         aws_access_key_id=settings.minio_access_key,
         aws_secret_access_key=settings.minio_secret_key,
