@@ -167,6 +167,23 @@ class Settings(BaseSettings):
                 )
         # openrouter / bedrock: no key field on Settings yet — leave alone.
 
+        # ISS-07: opting into HMAC fallback while still using the placeholder
+        # bootstrap secret means any caller who learned the well-known string
+        # `"dev-secret-please-rotate"` can forge runner webhooks. Refuse boot
+        # unless the operator either rotated the secret or explicitly flagged
+        # this as a stub / test run.
+        if (
+            self.allow_hmac_fallback
+            and self.kloc_hook_secret == "dev-secret-please-rotate"
+            and not self.stub_mode
+        ):
+            raise ValueError(
+                "allow_hmac_fallback=True with the default kloc_hook_secret "
+                "is unsafe: any caller who knows the placeholder bootstrap "
+                "secret can forge runner webhooks. Set KLOC_HOOK_SECRET to a "
+                "non-default value, or set KLOC_STUB_MODE=true for test runs."
+            )
+
         # Resolve provider-aware default model_id when the operator left it
         # unset. Done here (not via a `Field(default_factory=...)`) because
         # the default depends on a *sibling* field (`llm_provider`), which
