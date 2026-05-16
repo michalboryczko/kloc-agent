@@ -7,8 +7,7 @@
 // Every helper accepts an optional `signal?: AbortSignal`. React hook
 // callers manage controller lifecycle (effect cleanup, nav, dedup).
 
-const BROWSER_BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+import { BROWSER_BACKEND_URL } from "./config";
 
 export type SessionCreateResponse = {
   session_id: string;
