@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 from typing import Any
@@ -33,11 +34,20 @@ router = APIRouter(tags=["internal"])
 log = logging.getLogger("kloc_agent.internal")
 
 
+# Per-frame diagnostic emit is gated by an env var so production
+# traffic does not incur a sync-stderr write on every AG-UI event
+# (which blocks the event loop and floods stderr at moderate
+# throughput). Set KLOC_DIAG_EVENTS=1 in dev/CI to enable.
+_DIAG_ENABLED = bool(os.environ.get("KLOC_DIAG_EVENTS"))
+
+
 def _diag(msg: str) -> None:
-    """B-DIAG-EVENTS diagnostic emitter — writes directly to stderr to
-    bypass uvicorn's --log-config which silently filters `kloc_agent.*`
-    INFO records in the container image. stderr is never filtered by
-    uvicorn; the line lands in `docker compose logs backend` verbatim."""
+    """Diagnostic emitter -- writes directly to stderr to bypass
+    uvicorn's --log-config which can silently filter `kloc_agent.*`
+    INFO records in some container images. stderr is never filtered
+    by uvicorn. Gated by KLOC_DIAG_EVENTS so it is off by default."""
+    if not _DIAG_ENABLED:
+        return
     print(msg, file=sys.stderr, flush=True)
 
 
