@@ -23,7 +23,6 @@ import os
 # Boot-time `Settings` validates the configured LLM provider has a key.
 # Tests don't talk to an LLM — flip to stub mode before importing main.
 os.environ.setdefault("KLOC_STUB_MODE", "true")
-os.environ.setdefault("KLOC_RUNNER_MODE", "stub")
 
 import pytest
 from fastapi.testclient import TestClient

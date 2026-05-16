@@ -69,8 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 3. RunnerRegistry. Wire the real DockerRunner before the sweeper
     #    runs so the registry's `known_runner_ids()` (empty at boot) is
-    #    available. DockerRunner import is lazy so unit tests + the
-    #    Phase-2.0-stub mode keep working when aiodocker isn't installed.
+    #    available.
     app.state.settings = settings
     app.state.event_bus = event_bus
     # B-INFRA-DISPATCH: AG-UI 0.1.18 places `runId` only on lifecycle
@@ -95,40 +94,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         heartbeat_timeout_s=settings.runner_heartbeat_timeout_s,
         audit_emit=audit_emit,
     )
-    # B-INFRA-1: hard-fail boot in `docker` mode (default) if DockerRunner
-    # construction fails — silent stub fallback masked the missing
-    # /var/run/docker.sock bind-mount and broke every session-stream path
-    # after first user message. `stub` mode (explicit opt-in) tolerates
-    # missing aiodocker for CI / local-without-docker dev.
-    if settings.kloc_runner_mode == "docker":
-        from src.runner_mgmt.docker_runner import DockerRunner
+    # DockerRunner is the only runner mode. Construction failures
+    # (ImportError when aiodocker is missing, daemon unreachable, etc.)
+    # propagate to lifespan startup and abort boot. Tests inject a fake
+    # Runner via `RunnerRegistry.set_runner()` instead of swapping to a
+    # different runner mode.
+    from src.runner_mgmt.docker_runner import DockerRunner
 
-        docker_runner = DockerRunner(
-            image=settings.runner_image_tag,
-            network=settings.kloc_docker_network,
-            backend_url=settings.backend_url,
-            skills_host_dir=settings.kloc_skills_dir_host,
-            event_bus=event_bus,
-        )
-        runner_registry.set_runner(docker_runner)
-    else:
-        try:
-            from src.runner_mgmt.docker_runner import DockerRunner
-
-            docker_runner = DockerRunner(
-                image=settings.runner_image_tag,
-                network=settings.kloc_docker_network,
-                backend_url=settings.backend_url,
-                skills_host_dir=settings.kloc_skills_dir_host,
-                event_bus=event_bus,
-            )
-            runner_registry.set_runner(docker_runner)
-        except Exception:
-            logger.error(
-                "boot: KLOC_RUNNER_MODE=stub — DockerRunner unavailable; "
-                "registry will reject spawn requests",
-                exc_info=True,
-            )
+    docker_runner = DockerRunner(
+        image=settings.runner_image_tag,
+        network=settings.kloc_docker_network,
+        backend_url=settings.backend_url,
+        skills_host_dir=settings.kloc_skills_dir_host,
+        event_bus=event_bus,
+    )
+    runner_registry.set_runner(docker_runner)
     app.state.runner_registry = runner_registry
 
     # 4. Boot-time orphan-container sweep (AC25). At boot the registry's
