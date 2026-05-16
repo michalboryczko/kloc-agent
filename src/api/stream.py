@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import uuid
 from typing import Any, AsyncIterator, Optional
 
@@ -424,18 +423,12 @@ async def _build_hydration_payload(
         settings, "kloc_mcp_url", "http://host.docker.internal:8765/mcp"
     )
 
-    # LLM provider pivot: operator selected Gemini 3.1 Pro. Defaults
-    # are env-driven so the operator can override either provider or
-    # model_id without code change. Falls back to `settings.llm_provider`
-    # if `LLM_PROVIDER` env isn't set so the existing settings field
-    # remains authoritative when dev-1 wires KLOC_LLM_PROVIDER through.
-    llm_provider = os.environ.get("LLM_PROVIDER") or settings.llm_provider
-    model_id_default = (
-        "gemini-3.1-pro-preview"
-        if llm_provider == "gemini"
-        else "claude-3-5-haiku-20241022"
-    )
-    model_id = os.environ.get("LLM_MODEL_ID", model_id_default)
+    # Provider + model_id come from Settings only. Per-request env reads
+    # were a silent-override path that could route a session to a provider
+    # the operator never configured a key for; misconfig must surface at
+    # boot (the `_validate_provider_key` validator), not inside the runner.
+    llm_provider = settings.llm_provider
+    model_id = settings.llm_model_id
 
     return HydrationPayload(
         session_id=session_id,

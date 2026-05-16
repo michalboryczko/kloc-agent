@@ -120,3 +120,21 @@ def test_llm_model_id_env_override_wins(monkeypatch, tmp_path) -> None:
 
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.llm_model_id == "custom-model-x"
+
+
+def test_stream_call_site_uses_settings_only(monkeypatch, tmp_path) -> None:
+    # Pins the contract `src/api/stream.py:_build_hydration_payload` relies
+    # on after ISS-05: provider + model_id come from Settings, not env.
+    # If this test stops passing, the stream.py call site has regressed
+    # to reading env directly or the Settings default resolution broke.
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("LLM_MODEL_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.llm_provider == "anthropic"
+    assert s.llm_model_id == "claude-3-5-haiku-20241022"
