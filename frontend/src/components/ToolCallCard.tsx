@@ -1,7 +1,5 @@
 import { cn } from "@/lib/utils";
 
-type Status = "inProgress" | "executing" | "complete";
-
 function looksLikeDenial(result: unknown): boolean {
   if (typeof result !== "string") return false;
   const s = result.toLowerCase();
@@ -13,6 +11,33 @@ function looksLikeDenial(result: unknown): boolean {
   );
 }
 
+function CollapsibleJson({
+  label,
+  value,
+  defaultOpen = false,
+}: {
+  label: string;
+  value: unknown;
+  defaultOpen?: boolean;
+}) {
+  return (
+    <details
+      open={defaultOpen}
+      className="group mt-2 text-[var(--text-mute)]"
+    >
+      <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[12.5px] hover:text-[var(--text)]">
+        <span className="inline-block w-2 transition-transform duration-[120ms] ease-[var(--ease-out-snappy)] group-open:rotate-90">
+          ▸
+        </span>
+        {label}
+      </summary>
+      <pre className="mt-1.5 overflow-x-auto rounded p-2 font-mono text-[12px] text-[var(--text)] bg-[var(--bg-0)] border border-[var(--line)]">
+        {typeof value === "string" ? value : JSON.stringify(value, null, 2)}
+      </pre>
+    </details>
+  );
+}
+
 export function ToolCallCard({
   name,
   args,
@@ -21,7 +46,7 @@ export function ToolCallCard({
 }: {
   name: string;
   args: Record<string, unknown>;
-  status: Status | string;
+  status: string;
   result?: unknown;
 }) {
   const isComplete = status === "complete";
@@ -54,33 +79,11 @@ export function ToolCallCard({
       </div>
 
       {Object.keys(args).length > 0 && (
-        <details className="group mt-2 text-[var(--text-mute)]">
-          <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[12.5px] hover:text-[var(--text)]">
-            <span className="inline-block w-2 transition-transform duration-[120ms] ease-[var(--ease-out-snappy)] group-open:rotate-90">
-              ▸
-            </span>
-            arguments
-          </summary>
-          <pre className="mt-1.5 overflow-x-auto rounded p-2 font-mono text-[12px] text-[var(--text)] bg-[var(--bg-0)] border border-[var(--line)]">
-            {JSON.stringify(args, null, 2)}
-          </pre>
-        </details>
+        <CollapsibleJson label="arguments" value={args} />
       )}
 
       {isComplete && result !== undefined && (
-        <details open className="group mt-2 text-[var(--text-mute)]">
-          <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[12.5px] hover:text-[var(--text)]">
-            <span className="inline-block w-2 transition-transform duration-[120ms] ease-[var(--ease-out-snappy)] group-open:rotate-90">
-              ▸
-            </span>
-            result
-          </summary>
-          <pre className="mt-1.5 overflow-x-auto rounded p-2 font-mono text-[12px] text-[var(--text)] bg-[var(--bg-0)] border border-[var(--line)]">
-            {typeof result === "string"
-              ? result
-              : JSON.stringify(result, null, 2)}
-          </pre>
-        </details>
+        <CollapsibleJson label="result" value={result} defaultOpen />
       )}
     </div>
   );
