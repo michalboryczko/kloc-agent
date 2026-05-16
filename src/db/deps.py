@@ -1,4 +1,4 @@
-"""FastAPI dependency: AsyncSession per request (Phase 1.B3)."""
+"""FastAPI dependency: one AsyncSession per request."""
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator

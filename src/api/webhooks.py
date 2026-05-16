@@ -1,31 +1,24 @@
-"""HMAC webhook receiver (Phase 1.C-1.5).
+"""HMAC webhook receiver.
 
 POST /v1/webhooks/runners/{runner_id}/events
 
-Contract C invariants (binding):
-- Verify HMAC over `f"{ts}.{raw_body}"` (AC10).
-- Replay window 60 s (AC11).
-- Persist `audit_log` row in same DB tx as policy decision (AC10).
-- Respond `202 {decision, reason?}`. PoC policy defaults to allow;
-  deny path is driven by `KLOC_DENY_TOOLS` env var (AC19).
+Invariants:
+- Verify HMAC over `f"{ts}.{raw_body}"`.
+- Replay window 60 s.
+- Persist the `audit_log` row in the same DB tx as the policy decision.
+- Respond `202 {decision, reason?}`. Policy defaults to allow; the deny
+  path is driven by `KLOC_DENY_TOOLS`.
 
-The runner enforces the 2 s deadline + emits `HookBackpressure`
-CustomEvent on the AG-UI stream when the backend is slow (AC12). The
-backend just responds as fast as it can.
+The runner enforces the 2 s deadline and emits a `HookBackpressure`
+CustomEvent on the AG-UI stream when the backend is slow.
 
-Supported event names (X-Kloc-Hook-Event / body.event):
-- BeforeToolCall, AfterToolCall — Strands tool-call lifecycle hooks.
-- ArtifactRegistered — runner finished an S3 upload and asks the
-  backend to insert `artifact_metadata` (AC23). Idempotent via
-  ArtifactRepo.register's ON CONFLICT DO NOTHING.
+Supported event names (`X-Kloc-Hook-Event` / `body.event`):
+- `BeforeToolCall`, `AfterToolCall` — Strands lifecycle hooks.
+- `ArtifactRegistered` — runner finished an S3 upload; backend inserts
+  `artifact_metadata`. Idempotent via `ArtifactRepo.register`.
 
-**Heartbeats DO NOT come here.** Runner heartbeat frames flow over
-the JSONL ingress at `POST /internal/sessions/{id}/events`, where
-`src/api/internal.py` dispatches them to
-`RunnerRegistry.on_heartbeat_frame(session_id)` to reset the 30 s
-watcher (AC20). The HMAC webhook is reserved for events the runner
-needs an inline policy decision on or that participate in audit-with-
-persistence-side-effects.
+Heartbeats do NOT flow here — they arrive over the JSONL ingress and
+reset the per-session heartbeat watcher.
 """
 from __future__ import annotations
 
@@ -102,8 +95,8 @@ async def receive_runner_event(
     raw_body = await request.body()
 
     _diag(
-        f"B-DIAG-AUTH AUTH RX: runner_id={runner_id} "
-        f"ts_hdr={x_kloc_hook_ts} body_len={len(raw_body)} "
+        f"auth rx: runner_id={runner_id} ts_hdr={x_kloc_hook_ts} "
+        f"body_len={len(raw_body)} "
         f"sig_hdr_prefix={(authorization or '')[:24]!r}"
     )
 
@@ -119,7 +112,7 @@ async def receive_runner_event(
         settings.allow_hmac_fallback,
     )
     _diag(
-        f"B-DIAG-AUTH AUTH SECRET LOOKUP: runner_id={runner_id} "
+        f"auth secret lookup: runner_id={runner_id} "
         f"source={secret_source} secret_len={len(secret) if secret else 0}"
     )
 
@@ -129,22 +122,22 @@ async def receive_runner_event(
         # Reject BEFORE running HMAC verify so the global secret is never
         # tested against a request claiming an unknown runner_id.
         _diag(
-            f"B-DIAG-AUTH AUTH FAIL: reason=strict_no_runner_entry "
+            f"auth fail: reason=strict_no_runner_entry "
             f"runner_id={runner_id} secret_source={secret_source}"
         )
         raise HTTPException(status_code=401, detail="unknown runner")
 
     if not verify_hmac_signature(raw_body, ts_ms, authorization, secret):
         _diag(
-            f"B-DIAG-AUTH AUTH FAIL: reason=hmac_or_replay "
-            f"runner_id={runner_id} secret_source={secret_source} "
-            f"ts_ms={ts_ms} body_len={len(raw_body)}"
+            f"auth fail: reason=hmac_or_replay runner_id={runner_id} "
+            f"secret_source={secret_source} ts_ms={ts_ms} "
+            f"body_len={len(raw_body)}"
         )
         raise HTTPException(
             status_code=401,
             detail="invalid hmac or stale timestamp",
         )
-    _diag(f"B-DIAG-AUTH AUTH PASS: runner_id={runner_id}")
+    _diag(f"auth pass: runner_id={runner_id}")
 
     try:
         body = json.loads(raw_body)
@@ -159,16 +152,16 @@ async def receive_runner_event(
     policy = Policy(settings)
     decision = policy.decide(body)
 
-    # Persist audit row + side-effects (artifact register) + policy
-    # decision in SAME transaction (AC10, AC23 idempotency).
+    # Persist audit row + side effects (artifact register) + policy
+    # decision in the SAME transaction.
     session_id = _parse_uuid(body.get("session_id"))
     payload = body.get("payload") or {}
     message_id = _parse_uuid(payload.get("message_id"))
     audit_event = _audit_event_name(event_name, decision.get("decision"))
 
-    # ArtifactRegistered: insert artifact_metadata row idempotently. The
+    # ArtifactRegistered: insert artifact_metadata idempotently. The
     # ON CONFLICT (session_id, object_key) absorbs duplicate webhooks
-    # from runner retries (AC23). The artifact_registered audit row is
+    # from runner retries. The `artifact_registered` audit row is
     # emitted unconditionally — even on duplicate insert — so the audit
     # trail records every receive.
     response_extra: dict = {}
@@ -204,12 +197,12 @@ async def receive_runner_event(
             )
         response_extra = {"artifact_id": str(row.id), "created": created}
 
-    # In-flight tool-call tracking on the registry (dev-2 cross-stream).
-    # `tool_call.crashed` audit emission (AC20) needs us to register every
-    # BeforeToolCall ALLOW and unregister on AfterToolCall OR
-    # BeforeToolCall DENY (denied calls never fire so they can't crash).
-    # Done in the same handler so a missed call here means a missed
-    # crashed-emit if the runner dies.
+    # In-flight tool-call tracking on the registry. The
+    # `tool_call.crashed` audit emission needs every BeforeToolCall
+    # ALLOW registered and every AfterToolCall (or BeforeToolCall DENY)
+    # unregistered. Denied calls never fire and so can't crash; the
+    # bookkeeping happens in the same handler so a missed call here
+    # would mean a missed `crashed` emit if the runner dies.
     registry = getattr(request.app.state, "runner_registry", None)
     if registry is not None and session_id is not None:
         sid_str = str(session_id)
@@ -297,8 +290,8 @@ async def _resolve_runner_secret(
         request claiming any runner_id authenticate against the global
         secret.
 
-    The source string is logged so dev-3's smoke greps can distinguish
-    the legitimate match from the fallback path.
+    The source string is logged so operator smoke checks can
+    distinguish a legitimate per-runner match from the fallback path.
     """
     registry = getattr(request.app.state, "runner_registry", None)
     if registry is None:
@@ -315,7 +308,7 @@ async def _resolve_runner_secret(
         entry = await get_by_id(runner_id)
     except Exception:
         log.exception(
-            "B-DIAG-AUTH registry.get_by_runner_id raised; "
+            "registry.get_by_runner_id raised; "
             "falling back to bootstrap secret",
         )
         entry = None

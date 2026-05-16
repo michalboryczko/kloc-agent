@@ -1,8 +1,8 @@
-"""aioboto3 helpers (Phase 1.B12).
+"""aioboto3 helpers.
 
-The S3 client itself is lifespan-managed on `app.state.s3` (see
-src/main.py). These helpers take the client in so handlers can call them
-without importing FastAPI state directly.
+The S3 client is lifespan-managed on `app.state.s3`. These helpers
+take the client as a parameter so handlers can call them without
+importing FastAPI state directly.
 """
 from __future__ import annotations
 

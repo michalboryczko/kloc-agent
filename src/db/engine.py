@@ -1,8 +1,7 @@
-"""Async SQLAlchemy engine + session factory (Phase 1.B2).
+"""Async SQLAlchemy engine + session factory.
 
-Mirrors research/04 §3.3. `expire_on_commit=False` keeps loaded objects
-usable after commit, which simplifies REST/SSE handlers that return data
-they just mutated.
+`expire_on_commit=False` keeps loaded objects usable after commit, which
+simplifies REST/SSE handlers that return data they just mutated.
 """
 from __future__ import annotations
 

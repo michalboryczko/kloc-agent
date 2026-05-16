@@ -1,13 +1,10 @@
-"""Buffered text-delta persistence. Plan §378-§386 + Contract A invariant
-#2: every `TEXT_MESSAGE_CONTENT` flows through here, and we flush to
-`MessageRepo.append_delta()` either when the per-message buffer reaches
-256 chars or 250 ms has elapsed since the first byte arrived. We always
-flush on `TEXT_MESSAGE_END` and mark `messages.finalized_at = now()`.
+"""Buffered text-delta persistence.
 
-`append_delta(session, message_id, delta_str)` is owned by dev-1
-(Contract A cross-stream import, plan §318). We import lazily so the
-module loads cleanly during dev-1's parallel work even if `repos`
-hasn't been shipped yet."""
+Every `TEXT_MESSAGE_CONTENT` flows through here; we flush to
+`MessageRepo.append_delta` when the per-message buffer reaches 256
+chars or 250 ms has elapsed since the first byte arrived. We always
+flush on `TEXT_MESSAGE_END` and mark `messages.finalized_at = now()`.
+"""
 
 from __future__ import annotations
 

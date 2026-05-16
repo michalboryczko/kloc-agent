@@ -1,15 +1,11 @@
-"""Message repository (Phase 1.B9).
+"""Message repository.
 
-The hot path is `append_delta` which performs server-side concat to avoid
-re-sending the full body on every batched flush. See research/04 §2.2.
+The hot path is `append_delta`: a server-side concat UPDATE avoids
+re-sending the full body on every batched flush.
 
 `append` is the user/assistant/tool insert path. `seq` is calculated
-inside the same transaction as the INSERT via SELECT max(seq)+1 so
-wall-clock skew between runner and backend can't break ordering.
-
-Contract A (binding on dev-1 + dev-2):
-- AC4a: persist user message BEFORE forwarding to runner.
-- AC4c: text deltas flow through `append_delta` with server-side concat.
+inside the same transaction as the INSERT via `SELECT max(seq) + 1` so
+wall-clock skew between runner and backend cannot break ordering.
 """
 from __future__ import annotations
 
@@ -91,10 +87,10 @@ class MessageRepo:
         message_id: uuid.UUID,
         delta: str,
     ) -> None:
-        """Server-side `content = content || $1` UPDATE (AC4c).
+        """Server-side `content = content || $1` UPDATE.
 
         Called by the 256-char / 250-ms debouncer in
-        src/streaming/debounce.py. The streaming layer batches many
+        `src/streaming/debounce.py`; the streaming layer batches many
         token deltas into one buffered UPDATE.
         """
         await self._session.execute(
@@ -108,11 +104,12 @@ class MessageRepo:
         message_id: uuid.UUID,
         token_count: int | None = None,
     ) -> None:
-        """Mark a message finalized and emit `message_persisted` audit row
-        in the SAME transaction (locked vocabulary, AC4c flush event).
+        """Mark a message finalized and emit a `message_persisted` audit
+        row in the SAME transaction.
 
         Idempotent: if the message is already finalized, no audit row is
-        written (avoids dup rows on debouncer flush + explicit finalize).
+        written (avoids duplicate rows on debouncer flush + explicit
+        finalize).
         """
         values: dict = {"finalized_at": datetime.now(timezone.utc)}
         if token_count is not None:
@@ -157,7 +154,7 @@ class MessageRepo:
         after_seq: int | None = None,
         limit: int = 100,
     ) -> list[Message]:
-        """Ordered by per-session monotonic `seq` (AC2)."""
+        """Ordered by per-session monotonic `seq`."""
         stmt = select(Message).where(Message.session_id == session_id)
         if after_seq is not None:
             stmt = stmt.where(Message.seq > after_seq)

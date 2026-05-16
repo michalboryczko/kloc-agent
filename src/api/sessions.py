@@ -1,10 +1,10 @@
-"""Session lifecycle REST endpoints (Phase 1.C-1.1).
+"""Session lifecycle REST endpoints.
 
-POST /v1/sessions               -> 201 {session_id, created_at}      (AC1)
-GET  /v1/sessions/{id}          -> 200 {id, status, ...}              (AC2)
-GET  /v1/sessions/{id}/messages -> 200 {messages, next_cursor, ...}   (AC2)
-POST /v1/sessions/{id}/messages -> 202 {run_id, stream_url}           (AC4a — persist before forward)
-POST /v1/sessions/{id}/close    -> 204                                (AC3)
+POST /v1/sessions               -> 201 {session_id, created_at}
+GET  /v1/sessions/{id}          -> 200 {id, status, ...}
+GET  /v1/sessions/{id}/messages -> 200 {messages, next_cursor, ...}
+POST /v1/sessions/{id}/messages -> 202 {run_id, stream_url}
+POST /v1/sessions/{id}/close    -> 204
 """
 from __future__ import annotations
 
@@ -237,11 +237,11 @@ async def post_message(
     body: PostMessageBody,
     db: AsyncSession = Depends(get_session),
 ) -> PostMessageResponse:
-    """Persist user message BEFORE forwarding to runner (AC4a).
+    """Persist the user message BEFORE forwarding to the runner.
 
-    Returns `{run_id, stream_url}` so the frontend can open the SSE GET
-    or POST RunAgentInput envelope. dev-2 owns `/v1/sessions/{id}/stream`
-    which actually drives the runner.
+    Returns `{run_id, stream_url}` so the frontend can open the SSE
+    GET or POST a `RunAgentInput` envelope. The actual runner drive
+    happens on `/v1/sessions/{id}/stream`.
     """
     sessions = SessionRepo(db)
     session_row = await sessions.get(session_id)

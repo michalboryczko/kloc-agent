@@ -1,8 +1,8 @@
-"""`audit_emit` closure factory (reviewer-2 I1 fix).
+"""`audit_emit` closure factory.
 
 `RunnerRegistry`, `WarmIdleManager`, and `HeartbeatWatcher` emit audit
 events (`runner_spawned`, `runner_warm_idle_evicted`,
-`runner_heartbeat_lost`, `tool_call.crashed`) via a callback so they can
+`runner_heartbeat_lost`, `tool_call.crashed`) via a callback so they
 stay free of FastAPI / SQLAlchemy imports. Lifespan injects a closure
 that opens a fresh `AsyncSession` per emit and commits inline — one DB
 tx per audit row, no cross-task session sharing.
@@ -28,15 +28,16 @@ def make_audit_emit_closure(
     sessionmaker: async_sessionmaker,
     actor: str = "backend",
 ) -> AuditEmitFn:
-    """Return an `(event_type, session_id, payload) -> None` async callback.
+    """Return an `(event_type, payload) -> None` async callback.
 
-    Signature matches `dev-2.RunnerRegistry`'s `AuditEmitFn` Protocol:
-    `(event_type: str, payload: dict) -> Awaitable[None]` — but we accept
-    the `session_id` positionally so runner-management code doesn't have
-    to thread the session UUID into every payload.
+    Signature matches `RunnerRegistry`'s `AuditEmitFn` Protocol:
+    `(event_type: str, payload: dict) -> Awaitable[None]`. `session_id`
+    is extracted from `payload` so runner-management code does not have
+    to thread the UUID into every call site.
 
-    Each emit opens its own session + tx + commit. Failures are logged
-    and swallowed so a failed audit write never crashes runner management.
+    Each emit opens its own session, transaction, and commit. Failures
+    are logged and swallowed so a failed audit write never crashes
+    runner management.
     """
 
     async def emit(event_type: str, payload: dict[str, Any]) -> None:

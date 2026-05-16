@@ -1,8 +1,8 @@
-"""Application settings (Phase 1.A2).
+"""Application settings.
 
 Single `Settings(BaseSettings)` class reading the env vars declared in
-`.env.example`. Validation happens on boot so misconfiguration surfaces
-at startup rather than first request.
+`.env.example`. Validation happens at boot so misconfiguration surfaces
+at startup rather than on first request.
 """
 from __future__ import annotations
 
@@ -48,10 +48,10 @@ class Settings(BaseSettings):
     runner_heartbeat_timeout_s: int = 30
     runner_image_tag: str = "kloc-agent-runner:dev"
 
-    # Runner spawn config (dev-2 CR). Default matches the explicit
-    # `networks.kloc.name: kloc` block in docker-compose.yml so the runner
-    # joins the same bridge as the backend regardless of compose project
-    # name (COMPOSE_PROJECT_NAME doesn't apply to explicit-name networks).
+    # Default matches the explicit `networks.kloc.name: kloc` block in
+    # docker-compose.yml so the runner joins the same bridge as the
+    # backend regardless of compose project name
+    # (COMPOSE_PROJECT_NAME doesn't apply to explicit-name networks).
     kloc_docker_network: str = "kloc"
     kloc_skills_dir_host: str = "./skills"
 
@@ -97,8 +97,8 @@ class Settings(BaseSettings):
 
     kloc_deny_tools: str = Field(
         default="",
-        description="Comma-separated tool names to deny for AC19/QA10. "
-        "Empty (default) means allow-all (PoC behaviour).",
+        description="Comma-separated tool names to deny on the webhook "
+        "policy decision. Empty (default) means allow-all.",
     )
 
     @property
@@ -170,7 +170,7 @@ class Settings(BaseSettings):
                 )
         # openrouter / bedrock: no key field on Settings yet — leave alone.
 
-        # ISS-07: opting into HMAC fallback while still using the placeholder
+        # Opting into HMAC fallback while still using the placeholder
         # bootstrap secret means any caller who learned the well-known string
         # `"dev-secret-please-rotate"` can forge runner webhooks. Refuse boot
         # unless the operator either rotated the secret or explicitly flagged

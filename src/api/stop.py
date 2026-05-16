@@ -1,9 +1,8 @@
-"""Run cancel endpoint (Phase 1.C-1.7).
+"""Run cancel endpoint.
 
 POST /v1/sessions/{id}/runs/{run_id}/cancel -> 204
 
-Marks the run cancelled in the registry; dev-2's runner_registry
-implements `cancel(handle, run_id)` to forward the signal.
+Forwards the cancel signal through `RunnerRegistry.cancel`.
 """
 from __future__ import annotations
 

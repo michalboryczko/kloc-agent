@@ -1,4 +1,4 @@
-"""Alembic async env (Phase 1.B5). Mirrors research/04 §4.2."""
+"""Alembic async env."""
 from __future__ import annotations
 
 import asyncio

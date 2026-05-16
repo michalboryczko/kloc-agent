@@ -1,9 +1,8 @@
-"""Health endpoints (Phase 1.A8).
+"""Health endpoints.
 
-`/healthz`: always 200 once the process is up (used by compose healthcheck +
-load balancer liveness probes).
-`/readyz`: checks DB + S3 reachability; returns 503 with a JSON reason if
-either dependency is down. Used as a readiness gate before serving traffic.
+`/healthz`: 200 once the process is up (compose healthcheck / liveness).
+`/readyz`: 200 only when DB and S3 are reachable; 503 with a JSON reason
+otherwise. Used as a readiness gate before serving traffic.
 """
 from __future__ import annotations
 

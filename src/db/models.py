@@ -1,18 +1,10 @@
-"""ORM mappings + Pydantic Hydration schema (Phase 1.B4 + Contract D).
+"""ORM mappings + Pydantic Hydration schema.
 
-ORM tables (investigation §4 + research/04 §1):
-- sessions
-- messages
-- audit_log
-- artifact_metadata
+ORM tables: sessions, messages, audit_log, artifact_metadata.
+Pydantic models: HydrationPayload, McpStdioEndpoint, McpHttpEndpoint.
 
-Pydantic models (Contract D — type-only cross-stream import for dev-2):
-- HydrationPayload
-- McpStdioEndpoint
-- McpHttpEndpoint
-
-Single-source-of-truth Literal:
-- AuditEventType — the 12 names locked in the plan §Audit event vocabulary.
+`AuditEventType` is the single-source-of-truth Literal of the 12 locked
+audit event names.
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Session repository (Phase 1.B8)."""
+"""Session repository."""
 from __future__ import annotations
 
 import uuid

@@ -1,7 +1,9 @@
-"""Heartbeat watcher. Plan task D8: per-session task that times out at
-`RUNNER_HEARTBEAT_TIMEOUT_S=30` -> terminate container + mark session
-`runner_state='crashed'` + write `runner_heartbeat_lost` audit row.
-AC20, AC21."""
+"""Heartbeat watcher.
+
+Per-session task that fires after `RUNNER_HEARTBEAT_TIMEOUT_S` of silence:
+terminate the container, mark the session crashed, and write a
+`runner_heartbeat_lost` audit row.
+"""
 
 from __future__ import annotations
 

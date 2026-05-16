@@ -1,8 +1,8 @@
-"""Warm-idle eviction per architecture.md §3.3.
+"""Warm-idle eviction.
 
 One `WarmIdleManager` per running container, owned by `RunnerRegistry`.
-Per-session `asyncio.Event`-driven Task (NOT a polling sweeper). Plan
-tasks D7 (AC13, AC14, AC15)."""
+Per-session `asyncio.Event`-driven Task; not a polling sweeper.
+"""
 
 from __future__ import annotations
 
@@ -45,9 +45,9 @@ class WarmIdleManager:
             self._task.cancel()
 
     async def await_kill_in_flight(self) -> None:
-        """AC15 race handling. If a warm-idle kill is mid-flight when a new
-        user message arrives, the caller must `await` this before deciding
-        spawn-vs-reuse. Returns immediately if no kill is in progress."""
+        """If a warm-idle kill is mid-flight when a new user message
+        arrives, callers must `await` this before deciding spawn-vs-reuse.
+        Returns immediately if no kill is in progress."""
         task = self._task
         if task is None or task.done():
             return

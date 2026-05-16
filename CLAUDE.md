@@ -150,12 +150,20 @@
 - `log.exception()` — caught exceptions that should surface (always includes traceback via `exc_info=True` implicitly)
 - Avoid `log.debug()` in hot paths (not observed in codebase)
 ## Comments
-- Every non-trivial decision has an inline comment referencing plan sections, AC numbers, or reviewer IDs
-- Guard clauses explaining WHY a check exists (not just what it does)
-- Concurrency invariants documented where locking occurs (see `src/runner_mgmt/registry.py` module docstring explaining `_lock` discipline)
-- AC numbers: `(AC15)`, `(AC24)` etc. appear in comments throughout
-- Phase references: `Phase 1.A7`, `dev-2 CR`, `Track H` etc.
-- Reviewer comments: `# Reviewer-2 C1 follow-up:` in test files
+- Default to no comments. Code, names, and tests should communicate intent.
+- Comments are reserved for a non-obvious *why*: a real invariant, a
+  race condition, a non-trivial ordering requirement, or a domain
+  rule that is not visible from the surrounding code.
+- Comments must stand alone without project context. Do not reference
+  people (`dev-1`, `QA`, reviewer IDs), plan sections (`Phase 1.A7`,
+  `Plan §392`, `Track H`), acceptance criteria (`AC15`, `AC24`),
+  review rounds, finding IDs (`WR-NN`, `CR-NN`, `ISS-NN`,
+  `B-DIAG-*`), or historical narration (`# Reviewer-2 follow-up`,
+  `# Round 2 feedback`).
+- A guard-clause comment is acceptable only when the *why* is not
+  obvious from the condition itself.
+- Concurrency invariants near locking primitives are encouraged when
+  the lock discipline is non-trivial (see `src/runner_mgmt/registry.py`).
 ## Function Design
 - Pydantic models returned from API handlers (typed by `response_model=`)
 - `None` returned explicitly from `204 No Content` endpoints

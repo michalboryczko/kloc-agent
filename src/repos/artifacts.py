@@ -1,7 +1,7 @@
-"""Artifact metadata repository (Phase 1.B11).
+"""Artifact metadata repository.
 
-`register` is idempotent via `UNIQUE (session_id, object_key)` — retries
-of the runner's upload webhook collapse to no-op (AC23).
+`register` is idempotent via `UNIQUE (session_id, object_key)`: retries
+of the runner's upload webhook collapse to a no-op.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class ArtifactRepo:
         """Idempotent insert; returns (row, created).
 
         Uses ON CONFLICT (session_id, object_key) DO NOTHING so duplicate
-        webhooks from the runner collapse cleanly (AC23 idempotency).
+        webhooks from the runner collapse cleanly.
         """
         stmt = (
             pg_insert(ArtifactMetadata)

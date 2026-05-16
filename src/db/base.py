@@ -1,8 +1,7 @@
 """SQLAlchemy declarative base + MetaData naming convention.
 
-Plan §B1; mirrors research/04 §3.3. The naming convention is set on
-MetaData BEFORE the first migration so Alembic autogen names stay
-stable across the project's lifetime.
+The naming convention is set on MetaData BEFORE the first migration so
+Alembic autogen names stay stable across the project's lifetime.
 """
 from __future__ import annotations
 

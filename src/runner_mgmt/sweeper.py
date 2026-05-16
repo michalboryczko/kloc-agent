@@ -1,15 +1,9 @@
-"""Boot-time orphan-container sweeper. Plan task D9 (AC25).
+"""Boot-time orphan-container sweeper.
 
 Lists containers with label `kloc.role=runner`. Any container NOT in the
-backend's `RunnerRegistry` at boot is killed + removed. This is the
-defence against "backend crashed, runners survived" -- the runner is
+backend's `RunnerRegistry` at boot is killed and removed. This is the
+defence against "backend crashed, runners survived" — the runner is
 stateless so the cleanest path is to wipe orphans and let users resume.
-
-Call sites:
-- `src/main.py` lifespan: `await sweeper.orphan_sweep(settings)` at boot,
-  before yielding. At boot the registry is fresh (no `known_runner_ids`),
-  so every surviving runner is by definition orphaned and gets reaped.
-- Tests / ad-hoc: pass `known_runner_ids=registry.known_runner_ids()`.
 """
 
 from __future__ import annotations
@@ -41,8 +35,8 @@ async def orphan_sweep(
     if aiodocker is None:
         log.warning("orphan_sweep.skipped_no_aiodocker")
         return 0
-    # Back-compat: dev-1's lifespan passes the Settings object as the
-    # first positional arg; the actual ID set is the optional second.
+    # Back-compat: lifespan passes the Settings object as the first
+    # positional arg and the actual ID set as the optional second.
     # When called with only `known_runner_ids=[...]`, accept that too.
     if known_runner_ids is None and isinstance(settings_or_known, Iterable) and not hasattr(
         settings_or_known, "model_dump"

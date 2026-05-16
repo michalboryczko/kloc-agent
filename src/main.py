@@ -1,16 +1,11 @@
-"""FastAPI application entrypoint (Phase 1.A7 + 1.D / C1-10).
+"""FastAPI application entrypoint.
 
-Lifespan order (per plan §700-704 + AC25):
+Lifespan order:
   1. Create DB engine (sqlalchemy async)
-  2. Create S3 client (aioboto3) on app.state.s3
-  3. Initialize RunnerRegistry (dev-2 stub on day 1, real in Phase 2.D)
-  4. Run boot-time orphan-container sweep (dev-2 sweeper, exposed via
-     src/runner_mgmt)
-  5. Run boot-time DB orphan-message scan (AC24 -> 'stream_orphaned')
-
-Routers stubbed: not all routes are wired yet — dev-2 owns
-src/api/stream.py and contributes runner_registry / warm-idle / heartbeat
-managers to lifespan via a bundled change-request.
+  2. Create S3 client (aioboto3) on `app.state.s3`
+  3. Initialize `RunnerRegistry` + `DockerRunner`
+  4. Run boot-time orphan-container sweep
+  5. Run boot-time DB orphan-message scan ('stream_orphaned')
 """
 from __future__ import annotations
 
@@ -31,10 +26,8 @@ from src.settings import get_settings
 from src.streaming.event_bus import event_bus
 
 
-# Force the `kloc_agent` logger tree to INFO so B-DIAG-* observability
-# lines from `src/api/internal.py` + `src/api/webhooks.py` actually
-# reach uvicorn's stdout — uvicorn keeps the root logger at WARNING by
-# default and our custom logger inherits that level otherwise.
+# uvicorn keeps the root logger at WARNING; force the `kloc_agent`
+# tree to INFO so operational log lines reach stdout.
 logging.getLogger("kloc_agent").setLevel(logging.INFO)
 logger = logging.getLogger("kloc_agent")
 
@@ -72,13 +65,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     #    available.
     app.state.settings = settings
     app.state.event_bus = event_bus
-    # B-INFRA-DISPATCH: AG-UI 0.1.18 places `runId` only on lifecycle
-    # frames (RUN_STARTED / RUN_FINISHED / RUN_ERROR). All intermediate
-    # frames (TEXT_MESSAGE_*, TOOL_CALL_*, *_SNAPSHOT) correlate via
-    # messageId/toolCallId and don't repeat run_id. `_dispatch_frame`
-    # caches the active run_id per session here on RUN_STARTED and uses
-    # it to route every non-lifecycle frame to the right bus topic.
-    # Process-local dict; PoC is single-uvicorn-worker.
+    # AG-UI 0.1.18 places `runId` only on lifecycle frames
+    # (RUN_STARTED / RUN_FINISHED / RUN_ERROR); intermediate frames
+    # correlate via messageId/toolCallId. `_dispatch_frame` caches the
+    # active run_id per session here on RUN_STARTED so it can route
+    # every non-lifecycle frame to the right bus topic. Process-local
+    # dict: single uvicorn worker only.
     app.state.active_run_by_session = {}
     # Resume / replay buffer: under reconnect a non-lifecycle frame
     # may arrive before the new run's RUN_STARTED has been observed.
@@ -111,9 +103,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     runner_registry.set_runner(docker_runner)
     app.state.runner_registry = runner_registry
 
-    # 4. Boot-time orphan-container sweep (AC25). At boot the registry's
-    #    `known_runner_ids()` is empty; any container labelled kloc.role=runner
-    #    from a prior backend process is an orphan to be killed.
+    # 4. Boot-time orphan-container sweep. At boot the registry is
+    #    empty, so any container labelled `kloc.role=runner` from a
+    #    prior backend process is an orphan to be killed.
     try:
         from src.runner_mgmt import sweeper  # type: ignore[attr-defined]
 
@@ -121,17 +113,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings, known_runner_ids=runner_registry.known_runner_ids()
         )
     except (ImportError, AttributeError):
-        logger.info(
-            "boot: orphan_sweep not yet available (dev-2 Phase 2.D9) — skipping"
-        )
+        logger.info("boot: orphan_sweep not available — skipping")
     except Exception as e:  # pragma: no cover - defensive
         logger.exception("boot orphan-container sweep failed: %s", e)
 
-    # 5. Boot-time DB orphan-message scan (AC24). Catch ONLY transient
-    #    operational errors (DB unreachable, network blips). Misconfig
-    #    bugs like a missing greenlet (ValueError), import errors, or
-    #    schema mismatches MUST crash boot — masking them was hiding
-    #    QA's greenlet bug.
+    # 5. Boot-time DB orphan-message scan. Catch ONLY transient
+    #    operational errors (DB unreachable, network blip). Misconfig
+    #    bugs (missing greenlet, import errors, schema mismatches) MUST
+    #    crash boot rather than be masked.
     from sqlalchemy.exc import OperationalError, InterfaceError, DBAPIError
 
     from src.repos.boot import sweep_orphaned_messages

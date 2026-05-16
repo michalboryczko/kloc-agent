@@ -1,10 +1,9 @@
-"""Hook policy decision (Phase 1.C-1.4).
+"""Hook policy decision.
 
-PoC default: allow-all. For QA scenario 10 / AC19, the `KLOC_DENY_TOOLS`
-env var (set on the backend container) names tools that should be denied;
-the receiver returns `{"decision": "deny", "reason": "test-deny:<tool>"}`
-so the runner sets `event.cancel_tool = reason` and Strands aborts the
-tool inline.
+Default: allow-all. When `KLOC_DENY_TOOLS` names a tool, the receiver
+returns `{"decision": "deny", "reason": "test-deny:<tool>"}`; the
+runner translates that into `event.cancel_tool = reason` so Strands
+aborts the tool inline.
 """
 from __future__ import annotations
 

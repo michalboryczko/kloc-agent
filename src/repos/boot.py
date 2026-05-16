@@ -1,9 +1,9 @@
-"""Boot-time recovery helpers (Phase 1.B13 / AC24).
+"""Boot-time recovery helpers.
 
 On backend startup, any `messages.finalized_at IS NULL` is an orphaned
 stream from a prior process. Write a `stream_orphaned` audit row per
-orphan and mark the message finalized so subsequent reads aren't
-indefinitely stuck in 'streaming' state.
+orphan and mark the message finalized so subsequent reads are not
+stuck in a 'streaming' state forever.
 """
 from __future__ import annotations
 

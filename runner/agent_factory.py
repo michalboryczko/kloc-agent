@@ -1,28 +1,23 @@
 """Build a Strands `Agent` and wrap it in `ag_ui_strands.StrandsAgent`.
 
-Plan tasks D13, D17, E2, E3.
+Composition:
+  * model = provider-specific model via `model_factory.create_model`.
+  * tools = MCP tools (kloc-intelligence) + the summarizer sub-agent +
+    `file_read` for skill-body progressive disclosure.
+  * skills_prompt = `discover_skills` + `generate_skills_prompt`.
+  * No `session_manager` passed — Postgres is the source of truth.
+    History reconciliation happens via `RunAgentInput.messages` on
+    every `agent.run(input)` call.
 
-  * model = AnthropicModel via model_factory (constraint 4 — explicit).
-  * tools = MCP tools (kloc-intelligence) + sub-agent (summarizer) +
-    `file_read` (for skill body progressive disclosure, plan E3).
-  * skills_prompt = discover_skills + generate_skills_prompt (plan E2).
-  * NO `session_manager` passed (Postgres is SoT, plan investigation §2.1
-    option 1). History reconciliation happens via `RunAgentInput.messages`
-    on every `agent.run(input)` call.
-
-B-DIAG-A root cause + fix: `ag_ui_strands.StrandsAgent` constructs a
-fresh inner `StrandsAgentCore` per thread_id and only forwards what it
-extracts from the seed Agent (model / system_prompt / tool_registry /
-agent_kwargs). It explicitly EXCLUDES `hooks` from
-`_extract_agent_kwargs` because Strands stores hooks as a HookRegistry
-after init. The constructor accepts a separate `hooks=` kwarg, which is
-the only place a per-thread inner agent picks up hook providers.
-
-Therefore: callbacks registered via `agent.hooks.add_callback(...)` on
-the seed Agent are silently dropped. To make audit hooks fire on every
-tool call inside the AG-UI loop, we must:
-  1. Build a `HookProvider` that registers the audit callbacks.
-  2. Pass it via `StrandsAgent(..., hooks=[provider])`.
+Hook plumbing: `ag_ui_strands.StrandsAgent` constructs a fresh inner
+`StrandsAgentCore` per `thread_id` and only forwards what it extracts
+from the seed Agent (model / system_prompt / tool_registry /
+agent_kwargs). It explicitly excludes hooks from `_extract_agent_kwargs`
+because Strands stores them on a HookRegistry post-init. The
+constructor accepts a separate `hooks=` kwarg — the only path through
+which a per-thread inner agent picks up hook providers. We therefore
+build a `HookProvider` that registers the audit callbacks and pass it
+via `StrandsAgent(..., hooks=[provider])`.
 """
 
 from __future__ import annotations
@@ -56,9 +51,9 @@ class _AuditHookProvider:
         )
 
         log.info(
-            "AUDIT HOOK REGISTER: BeforeToolCall + AfterToolCall via "
+            "audit hook register: BeforeToolCall + AfterToolCall via "
             "HookProvider on per-thread StrandsAgentCore"
-        )  # B-DIAG-A
+        )
         registry.add_callback(
             BeforeToolCallEvent, self._audit_sender.before_tool_call
         )
@@ -163,20 +158,16 @@ def build_agent(
 
 
 def wrap_for_agui(agent: Any, audit_provider: _AuditHookProvider | None = None) -> Any:
-    """Return the AG-UI-emitting adapter. Plan D17.
+    """Return the AG-UI-emitting adapter.
 
     `ag_ui_strands.StrandsAgent(agent, StrandsAgentConfig(...),
     hooks=[audit_provider]).run(RunAgentInput)` yields AG-UI events
     directly.
 
-    B-DIAG-A fix: pass `audit_provider` so the per-thread inner agent
-    constructed by the wrapper picks up the BeforeToolCall +
-    AfterToolCall hooks. Without this, audit POSTs never fire because
-    the wrapper drops the seed Agent's hook registry on the floor.
-
-    TODO: QA scenario 9 measures `MESSAGES_SNAPSHOT` bandwidth. If the
-    snapshot stream proves too chatty, expose `emit_messages_snapshot`
-    on StrandsAgentConfig — currently we accept the default."""
+    Passing `audit_provider` is required: the per-thread inner agent
+    the wrapper constructs only picks up hooks supplied via the
+    `hooks=` kwarg; the seed Agent's hook registry is discarded.
+    """
     from ag_ui_strands import StrandsAgent, StrandsAgentConfig  # type: ignore
 
     hooks_arg = [audit_provider] if audit_provider is not None else None

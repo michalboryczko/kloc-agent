@@ -1,15 +1,16 @@
-"""Contract C sender. Plan task D14 (AC10, AC12, AC19).
+"""Audit-webhook sender.
 
-`BeforeToolCallEvent` callback wires `httpx.AsyncClient.post(timeout=2)`
-to `/v1/webhooks/runners/{runner_id}/events`. HMAC-signed body.
+`BeforeToolCallEvent` posts to `/v1/webhooks/runners/{runner_id}/events`
+with an HMAC-signed body and a 2 s deadline.
 
-Behavioural contract (plan §454-§477):
-  1. Sync semantics on Before*: block until backend responds OR 2 s.
-  2. On 2 s timeout: set `event.cancel_tool = "policy_deadline_exceeded"`
-     + emit `CustomEvent(name="HookBackpressure", ...)` to the AG-UI stream.
+Behaviour:
+  1. Before*: blocks until the backend responds OR 2 s.
+  2. On 2 s timeout: `event.cancel_tool = "policy_deadline_exceeded"`
+     and emit a `CustomEvent(name="HookBackpressure", ...)` on the
+     AG-UI stream.
   3. On `{decision: "deny", reason}`: `event.cancel_tool = reason`.
-  4. AfterToolCall is fire-and-forget; bounded queue of 256; drop
-     heartbeats first when full; never drop Before*.
+  4. After*: fire-and-forget; bounded queue of 256; drop heartbeats
+     first when full; never drop Before*.
 """
 
 from __future__ import annotations
@@ -103,14 +104,14 @@ class AuditHookSender:
             self._http = None
 
     async def before_tool_call(self, event: Any) -> None:
-        """Plan §455-§464. Blocks until backend responds or 2s timeout."""
+        """Block until the backend responds or the 2 s deadline lapses."""
         tool_name, tool_input = resolve_tool_call(event)
         log.info(
-            "AUDIT HOOK FIRED: BeforeToolCall for tool=%s session=%s run=%s",
+            "audit hook fired: BeforeToolCall tool=%s session=%s run=%s",
             tool_name,
             self._session_id,
             self._run_id_provider(),
-        )  # B-DIAG-A
+        )
         payload = self._build_payload(
             event_name="BeforeToolCall",
             payload={
@@ -146,15 +147,15 @@ class AuditHookSender:
             event.cancel_tool = response.get("reason", "policy_denied")
 
     async def after_tool_call(self, event: Any) -> None:
-        """Plan §473-§476. Fire-and-forget; drop heartbeats first if
-        the queue overflows; never drop Before*."""
+        """Fire-and-forget; drop heartbeats first when the queue
+        overflows; never drop Before*."""
         tool_name, tool_input = resolve_tool_call(event)
         log.info(
-            "AUDIT HOOK FIRED: AfterToolCall for tool=%s session=%s run=%s",
+            "audit hook fired: AfterToolCall tool=%s session=%s run=%s",
             tool_name,
             self._session_id,
             self._run_id_provider(),
-        )  # B-DIAG-A
+        )
         result = getattr(event, "result", None)
         payload = self._build_payload(
             event_name="AfterToolCall",
@@ -207,27 +208,27 @@ class AuditHookSender:
             f"{self._backend_url}/v1/webhooks/runners/{self._runner_id}/events"
         )
         log.info(
-            "AUDIT HOOK POST -> %s [event=%s bytes=%d]",
+            "audit hook post -> %s [event=%s bytes=%d]",
             url,
             event_name,
             len(body),
-        )  # B-DIAG-A
+        )
         try:
             r = await self._http.post(url, content=body, headers=headers)
         except Exception as exc:
             log.warning(
-                "AUDIT HOOK POST FAILED -> %s [event=%s err=%r]",
+                "audit hook post failed -> %s [event=%s err=%r]",
                 url,
                 event_name,
                 exc,
-            )  # B-DIAG-A
+            )
             raise
         log.info(
-            "AUDIT HOOK POST DONE  -> %s [event=%s status=%d]",
+            "audit hook post done  -> %s [event=%s status=%d]",
             url,
             event_name,
             r.status_code,
-        )  # B-DIAG-A
+        )
         r.raise_for_status()
         return r.json()
 

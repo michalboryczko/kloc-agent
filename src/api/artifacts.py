@@ -1,6 +1,6 @@
-"""Artifact endpoints (Phase 1.C-1.6).
+"""Artifact endpoints.
 
-GET /v1/artifacts/{id} -> 302 redirect to presigned MinIO URL. (AC23)
+GET /v1/artifacts/{id} -> 302 redirect to a presigned MinIO URL.
 """
 from __future__ import annotations
 

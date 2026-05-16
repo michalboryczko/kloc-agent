@@ -1,19 +1,16 @@
-"""RunnerRegistry. Plan task D6.
+"""RunnerRegistry.
 
 Per-session lookup `dict[session_id, RunnerHandle]`. `get_or_spawn`
-checks for a live container; otherwise spawns via DockerRunner.
-Holds per-session `WarmIdleManager` + heartbeat watcher tasks.
+checks for a live container; otherwise spawns via DockerRunner. Holds
+per-session `WarmIdleManager` + heartbeat watcher tasks.
 
 Audit-event emitters: `runner_spawned` (here), `runner_warm_idle_evicted`
 (via WarmIdleManager.on_evict), `runner_heartbeat_lost` +
-`tool_call.crashed` (via HeartbeatWatcher.on_crash). Plan §575-§578.
+`tool_call.crashed` (via HeartbeatWatcher.on_crash).
 
-Concurrency model (reviewer-2 C1 follow-up):
-- `_lock` guards the `_entries` dict only.
-- We MUST NOT hold `_lock` while awaiting a kill task, because the
-  kill's `_on_evict` callback re-acquires `_lock` to remove the entry.
-  `get_or_spawn` therefore takes the lock only for short critical
-  sections and releases it across awaits on warm-idle.
+Concurrency invariant: `_lock` guards `_entries` only. Holding it across
+a kill-task await would deadlock because the kill's `_on_evict` callback
+re-acquires it.
 """
 
 from __future__ import annotations
@@ -47,6 +44,10 @@ class RegistryEntry:
     heartbeat: HeartbeatWatcher
     inbox: asyncio.Queue
     audit_emit: Callable[[str, dict], Awaitable[None]] | None
+    # In-flight tool calls: tool_call_id -> tool_name. Populated on
+    # BeforeToolCall webhook receipt; cleared on AfterToolCall. Used by
+    # `_on_crash` to emit `tool_call.crashed` when the runner dies with
+    # tool calls outstanding.
     in_flight_tool_calls: dict[str, str] = field(default_factory=dict)
     _is_alive_cache: tuple[bool, float] | None = field(
         default=None, repr=False, compare=False
@@ -69,9 +70,8 @@ class RegistryEntry:
 
 
 AuditEmitFn = Callable[[str, dict], Awaitable[None]]
-"""(`event_type`, `payload`) -> coroutine. Plan §581 single source of
-truth in `src/db/models.py:AuditEventType`; dev-1 wires the actual DB
-write."""
+"""(`event_type`, `payload`) -> coroutine. Canonical event-type vocabulary
+lives in `src/db/models.py:AuditEventType`."""
 
 
 class RunnerRegistry:
@@ -84,27 +84,22 @@ class RunnerRegistry:
         heartbeat_timeout_s: float = 30.0,
         audit_emit: AuditEmitFn | None = None,
     ) -> None:
-        # `runner=None` is the Phase 2.0 day-1 stub mode (issue #10
-        # resolution). dev-1's lifespan can call `RunnerRegistry()` to
-        # have lifespan import-clean before the real impl is wired.
-        # spawn-paths fail loudly until `set_runner(...)` is called.
+        # `runner=None` lets lifespan import-clean before a concrete
+        # Runner is wired. Spawn paths fail loudly until `set_runner` runs.
         self._runner: "Runner | None" = runner
         self._warm_idle_s = warm_idle_s
         self._heartbeat_timeout_s = heartbeat_timeout_s
         self._audit_emit = audit_emit
         self._entries: dict[str, RegistryEntry] = {}
-        # Reverse index `runner_id -> session_id`. Maintained in
-        # `_install_entry` and `_remove_entry` so `get_by_runner_id`
-        # is O(1). Without this every inbound webhook hot-path call
-        # serialized on a full registry scan under `_lock`.
+        # Reverse index runner_id -> session_id, kept O(1) for the
+        # inbound-webhook hot path.
         self._by_runner_id: dict[str, str] = {}
         self._lock = asyncio.Lock()
-        # Per-session spawn locks: serialize concurrent `get_or_spawn`
-        # callers for the same session_id so we never end up with two
-        # runner containers for one session. `_lock` guards only the
-        # registry-map invariants -- it can't cover the spawn body
-        # because the kill task's `_on_evict` callback re-acquires it
-        # (would deadlock; see Concurrency model above).
+        # Per-session spawn locks serialize concurrent `get_or_spawn`
+        # callers for the same session so we never end up with two
+        # containers for one session. Held outside `_lock` so the kill
+        # task's `_on_evict` callback can re-acquire `_lock` without
+        # deadlocking.
         self._spawn_locks: dict[str, asyncio.Lock] = {}
 
     def set_runner(
@@ -115,23 +110,18 @@ class RunnerRegistry:
         heartbeat_timeout_s: float | None = None,
         audit_emit: AuditEmitFn | None = None,
     ) -> None:
-        """Wire the real runner after construction. Called from
-        `src/main.py` lifespan once dev-1 applies the bundled
-        change-request to instantiate DockerRunner.
+        """Wire the real runner after construction.
 
-        Reviewer-2 R1 + team-lead loop-1 directive: refuse to transition
-        from stub-mode to real-runner mode without an `audit_emit`. The
-        `RunnerRegistry()` no-args day-1 stub remains supported (it lets
-        lifespan import-clean before dev-1's repos exist), but the
-        moment a real Runner is wired we lock in the audit chain --
-        silent drop of `runner_spawned` / `runner_warm_idle_evicted` /
-        `runner_heartbeat_lost` / `tool_call.crashed` is unacceptable
-        for QA's scenario assertions."""
+        Transitioning from the no-runner construction state to a real
+        runner requires an `audit_emit`: otherwise `runner_spawned`,
+        `runner_warm_idle_evicted`, `runner_heartbeat_lost`, and
+        `tool_call.crashed` would silently drop.
+        """
         if audit_emit is None and self._audit_emit is None:
             raise ValueError(
                 "audit_emit required when a real Runner is wired; "
-                "RunnerRegistry() day-1 stub mode is for lifespan "
-                "import only. Pass audit_emit=<AuditRepo.append bridge>."
+                "construct without one only for import-clean lifespans. "
+                "Pass audit_emit=<AuditRepo.append bridge>."
             )
         self._runner = runner
         if warm_idle_s is not None:
@@ -165,18 +155,15 @@ class RunnerRegistry:
         *,
         expected_runner_id: str | None = None,
     ) -> RegistryEntry | None:
-        """Lock-scoped helper. Used by `_on_evict` / `_on_crash` and by
-        get_or_spawn's "container died" branch.
+        """Lock-scoped entry removal.
 
         When `expected_runner_id` is provided, the removal only fires if
         the currently installed entry's handle matches that runner_id.
-        This guards against a stale callback (e.g. a HeartbeatWatcher
-        belonging to an already-evicted runner) racing in *after* a
-        fresh runner has been installed under the same session_id and
-        wiping the new entry out from under us. Without this check the
-        first heartbeat-frame from the fresh runner finds an empty
-        registry slot, no inbox delivery happens, and the SSE client
-        gets an empty 200.
+        Without this guard a stale HeartbeatWatcher belonging to an
+        already-evicted runner could race in after a fresh runner had
+        been installed for the same session and wipe the new entry — the
+        next heartbeat-frame would find an empty slot and the SSE client
+        would get an empty 200.
         """
         async with self._lock:
             current = self._entries.get(session_id)
@@ -195,10 +182,9 @@ class RunnerRegistry:
                 if rid is not None:
                     self._by_runner_id.pop(rid, None)
             # Drop the per-session spawn lock to keep `_spawn_locks`
-            # bounded. Safe under `_lock` because we never hold the
-            # spawn lock here -- only the next `get_or_spawn` would
-            # acquire it, and that's the moment a fresh lock should
-            # be created anyway.
+            # bounded. Safe under `_lock` because the spawn lock is
+            # only acquired by `get_or_spawn`, which would re-create
+            # it on the next call.
             self._spawn_locks.pop(session_id, None)
             return entry
 
@@ -208,10 +194,11 @@ class RunnerRegistry:
 
     async def _get_spawn_lock(self, session_id: str) -> asyncio.Lock:
         """Create-on-miss accessor for the per-session spawn lock.
-        Guarded by `_lock` only for the dict mutation itself -- the
-        returned lock is then acquired OUTSIDE of `_lock` by the
-        caller (`get_or_spawn`) so we don't widen `_lock` over the
-        spawn body."""
+
+        `_lock` is held only for the dict mutation; the returned lock is
+        acquired by the caller outside `_lock` so the spawn body does not
+        widen the registry-map critical section.
+        """
         async with self._lock:
             lock = self._spawn_locks.get(session_id)
             if lock is None:
@@ -228,10 +215,9 @@ class RunnerRegistry:
                 "from lifespan before handling requests"
             )
 
-        # AC15 race: a warm-idle kill task might be mid-flight. We must
-        # NOT hold `_lock` while awaiting it, because the kill's
-        # `_on_evict` callback acquires `_lock` to remove the entry
-        # (deadlock otherwise — reviewer-2 C1).
+        # A warm-idle kill task might be mid-flight. Awaiting it while
+        # holding `_lock` would deadlock because the kill's `_on_evict`
+        # callback re-acquires `_lock`.
         entry = await self._get_entry(session_id)
         if entry is not None:
             await entry.warm_idle.await_kill_in_flight()
@@ -246,12 +232,9 @@ class RunnerRegistry:
             if entry is not None:
                 await self._remove_entry(session_id)
 
-        # No live container — spawn fresh. Serialize concurrent
-        # spawners for this session_id via a per-session spawn lock so
-        # only one container is created when N callers race here at
-        # once. We acquire this lock OUTSIDE `_lock` to preserve the
-        # deadlock-avoidance invariant documented above (kill task's
-        # `_on_evict` callback re-acquires `_lock`).
+        # Serialize concurrent spawners per session so N racing callers
+        # never produce two containers. Acquired outside `_lock` to keep
+        # the kill-task deadlock invariant.
         spawn_lock = await self._get_spawn_lock(session_id)
         async with spawn_lock:
             # Double-check: a concurrent caller may have already
@@ -283,13 +266,10 @@ class RunnerRegistry:
         entry_ref: dict[str, RegistryEntry] = {}
 
         async def _on_evict() -> None:
-            # Stop the heartbeat watcher BEFORE removing the registry
-            # entry. Otherwise the stale watcher keeps looping on the
-            # already-terminated handle and, ~30s later, fires _on_crash
-            # which would wipe out whichever entry currently occupies
-            # `session_id` -- including a brand-new runner that arrived
-            # after the eviction. (The `expected_runner_id` guard in
-            # `_remove_entry` is the belt; this stop() is the braces.)
+            # Stop the heartbeat watcher BEFORE removing the entry. A
+            # stale watcher would otherwise keep looping on the
+            # terminated handle and ~30s later wipe whichever entry now
+            # occupies `session_id` — including a brand-new runner.
             try:
                 await heartbeat.stop()
             except Exception:
@@ -333,8 +313,8 @@ class RunnerRegistry:
                         "runner_id": getattr(handle, "runner_id", None),
                     },
                 )
-                # Plan §575 / AC20: a mid-flight tool call when the
-                # runner crashes must surface as `tool_call.crashed`.
+                # A mid-flight tool call when the runner crashes must
+                # surface as `tool_call.crashed`.
                 for tool_call_id, tool_name in in_flight.items():
                     await self._audit_emit(
                         "tool_call.crashed",
@@ -380,10 +360,8 @@ class RunnerRegistry:
         return await self._get_entry(session_id)
 
     async def get_by_runner_id(self, runner_id: str) -> RegistryEntry | None:
-        """O(1) reverse lookup via the `runner_id -> session_id` index
-        maintained in `_install_entry` / `_remove_entry`. Used by
-        `src/api/webhooks.py` to look up the per-runner HMAC secret on
-        every inbound webhook -- O(n) here was a per-event hot-path."""
+        """O(1) reverse lookup. The inbound-webhook HMAC-secret lookup
+        runs once per event and cannot be O(n) over the registry."""
         async with self._lock:
             sid = self._by_runner_id.get(runner_id)
             if sid is None:
@@ -394,14 +372,13 @@ class RunnerRegistry:
         self, session_id: str, timeout_s: float
     ) -> dict | None:
         """Pull the next inbound frame for `session_id`, or None on
-        timeout / no entry. Used by the long-poll endpoint at
-        `GET /internal/sessions/{sid}/inbox` (Contract B inbound).
+        timeout / no entry.
 
-        Returns immediately with None if no entry exists for the
-        session (runner is gone / never spawned). Otherwise waits up to
-        `timeout_s` for the next queued frame. Frames are queued by
-        `src/api/stream.py:stream_post` via `entry.inbox.put({...})`
-        when a new user message arrives."""
+        Returns None immediately if no entry exists for the session.
+        Otherwise waits up to `timeout_s` for the next queued frame.
+        Frames are enqueued by `src/api/stream.py:stream_post` when a
+        new user message arrives.
+        """
         entry = await self._get_entry(session_id)
         if entry is None:
             return None
@@ -417,26 +394,23 @@ class RunnerRegistry:
             getattr(e.handle, "runner_id", "") for e in self._entries.values()
         ]
 
-    # ----- Event hooks invoked by `src/api/internal.py` and
-    # ----- `src/api/webhooks.py` (dev-1's files; cross-stream contract).
+    # Event hooks invoked by the API layer.
 
     async def on_heartbeat_frame(self, session_id: str) -> None:
-        """Reviewer-2 C2 / N1: called by `src/api/internal.py:_dispatch_frame`
-        when a `{"type":"heartbeat",...}` JSONL frame arrives. Resets
-        the per-session heartbeat-dead timer.
+        """Reset the per-session heartbeat-dead timer.
 
-        Name aligns with dev-1's `_dispatch_frame` getattr lookup
-        (`getattr(registry, "on_heartbeat_frame", None)`). Without the
-        `_frame` suffix the getattr silently returns None and healthy
-        runners die at the 30s heartbeat timeout."""
+        Method name must end in `_frame` to match the getattr lookup in
+        `src/api/internal.py:_dispatch_frame`; without it the getattr
+        silently returns None and healthy runners die at heartbeat timeout.
+        """
         entry = await self._get_entry(session_id)
         if entry is None:
             return
         entry.heartbeat.beat()
 
     async def on_run_finished(self, session_id: str) -> None:
-        """Called by `src/api/internal.py` when a `RUN_FINISHED` JSONL
-        frame arrives; starts the warm-idle countdown (AC13)."""
+        """Start the warm-idle countdown when a `RUN_FINISHED` frame
+        arrives."""
         entry = await self._get_entry(session_id)
         if entry is None:
             return
@@ -445,9 +419,9 @@ class RunnerRegistry:
     async def on_tool_call_started(
         self, session_id: str, tool_call_id: str, tool_name: str
     ) -> None:
-        """Called by `src/api/webhooks.py` on `BeforeToolCall`. Records
-        the in-flight call so `_on_crash` can emit `tool_call.crashed`
-        if the runner dies before AfterToolCall (AC20)."""
+        """Record an in-flight tool call on `BeforeToolCall` so
+        `_on_crash` can emit `tool_call.crashed` if the runner dies
+        before `AfterToolCall`."""
         entry = await self._get_entry(session_id)
         if entry is None:
             return
@@ -456,8 +430,7 @@ class RunnerRegistry:
     async def on_tool_call_completed(
         self, session_id: str, tool_call_id: str
     ) -> None:
-        """Called by `src/api/webhooks.py` on `AfterToolCall`. Removes
-        the in-flight record."""
+        """Remove the in-flight record on `AfterToolCall`."""
         entry = await self._get_entry(session_id)
         if entry is None:
             return

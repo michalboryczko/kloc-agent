@@ -1,19 +1,17 @@
-"""Backend↔Runner internal API (Phase 1.C-1.2).
+"""Backend↔Runner internal API.
 
-POST /internal/sessions/{id}/events   chunked JSONL ingress (runner -> backend)
-GET  /internal/sessions/{id}/inbox    long-poll (backend -> runner, ≤ 25 s)
+POST /internal/sessions/{id}/events   chunked JSONL ingress (runner → backend)
+GET  /internal/sessions/{id}/inbox    long-poll (backend → runner, ≤ 25 s)
 
-Localhost-only in PoC (compose bridge); no public auth.
+Localhost-only inside the compose bridge; no public auth.
 
-This module owns the *transport*: parse JSONL frames off the wire and
-publish AG-UI events into the in-proc `EventBus` keyed by
-`(session_id, run_id)`. Lifecycle frames (`heartbeat`, RunnerHeartbeat)
-are forwarded to the runner registry's heartbeat watcher if it exposes
-one; otherwise they are dropped (registry stub mode).
+Owns the transport: parse JSONL frames off the wire and publish AG-UI
+events into the in-proc `EventBus` keyed by `(session_id, run_id)`.
+Lifecycle frames (`heartbeat`, `RunnerHeartbeat`) reset the runner
+registry's heartbeat watcher; everything else flows to the bus.
 
-Contract B (plan §392-§427): every line is one JSON object. AG-UI events
-carry `runId` (camelCase per AG-UI 0.1.18); runner-internal frames carry
-`type: "heartbeat"`.
+AG-UI events carry `runId` (camelCase); runner-internal liveness frames
+carry `type: "heartbeat"`.
 """
 from __future__ import annotations
 
@@ -46,23 +44,21 @@ def _diag(msg: str) -> None:
 async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> None:
     """Route one JSONL frame to the right consumer.
 
-    - `type: "heartbeat"` → `RunnerRegistry.on_heartbeat_frame(session_id)`
-      so dev-2's HeartbeatWatcher resets its 30 s timer (AC20 fix).
-    - `type: "RUN_FINISHED"` → also notify `RunnerRegistry.on_run_finished`
-      so WarmIdleManager starts the 60s countdown (AC13). The frame is
-      ALSO published to the event_bus for SSE consumers.
-    - AG-UI event with `runId` → `event_bus.publish(session_id, run_id, frame)`.
-    - Anything else → log+drop (don't crash the ingress on unknowns).
-
-    Heartbeat frames are NEVER published to the event_bus — they're
-    runner-internal liveness signals, not AG-UI events.
+    - `type: "heartbeat"` / `"RunnerHeartbeat"` →
+      `RunnerRegistry.on_heartbeat_frame(session_id)`. Never published
+      to the event bus — these are liveness signals, not AG-UI events.
+    - `type: "RUN_FINISHED"` → also notify
+      `RunnerRegistry.on_run_finished` so the warm-idle countdown
+      starts; the frame is also published to the event bus so SSE
+      consumers can close cleanly.
+    - AG-UI event with `runId` → `event_bus.publish(...)`.
+    - Anything else → drop without crashing the ingress.
     """
     frame_type = frame.get("type") or ""
     registry = getattr(request.app.state, "runner_registry", None)
     run_id = frame.get("runId") or frame.get("run_id")
     _diag(
-        f"B-DIAG-EVENTS EVENTS FRAME: type={frame_type} "
-        f"run_id={run_id} session_id={session_id}"
+        f"frame: type={frame_type} run_id={run_id} session_id={session_id}"
     )
 
     if frame_type in ("heartbeat", "RunnerHeartbeat"):
@@ -70,12 +66,9 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
         if on_hb is not None:
             try:
                 await on_hb(session_id)
-                _diag(
-                    f"B-DIAG-EVENTS EVENTS DISPATCHED: type={frame_type} "
-                    "-> on_heartbeat_frame"
-                )
+                _diag(f"dispatched: type={frame_type} -> on_heartbeat_frame")
             except Exception:  # pragma: no cover - defensive
-                log.exception("B-DIAG-EVENTS on_heartbeat_frame failed")
+                log.exception("on_heartbeat_frame failed")
         return
 
     if frame_type == "RUN_FINISHED":
@@ -83,28 +76,22 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
         if on_finished is not None:
             try:
                 await on_finished(session_id)
-                _diag(
-                    "B-DIAG-EVENTS EVENTS DISPATCHED: "
-                    "type=RUN_FINISHED -> on_run_finished"
-                )
+                _diag("dispatched: type=RUN_FINISHED -> on_run_finished")
             except Exception:  # pragma: no cover - defensive
-                log.exception("B-DIAG-EVENTS on_run_finished failed")
+                log.exception("on_run_finished failed")
         # Fall through — RUN_FINISHED IS an AG-UI event; SSE consumers
         # need it to close the stream cleanly.
 
     bus = getattr(request.app.state, "event_bus", None)
     if bus is None:
-        _diag(f"B-DIAG-EVENTS EVENTS NO BUS: type={frame_type} dropped")
+        _diag(f"no bus: type={frame_type} dropped")
         return
 
-    # AG-UI 0.1.18: only RUN_STARTED / RUN_FINISHED / RUN_ERROR carry
-    # `runId` on the frame. All intermediate frames (TEXT_MESSAGE_*,
-    # TOOL_CALL_*, MESSAGES_SNAPSHOT, STATE_SNAPSHOT, ...) correlate via
-    # messageId/toolCallId and do NOT repeat run_id. Cache the active
-    # run per session on RUN_STARTED so intermediate frames key onto the
-    # right bus topic. Cleared on RUN_FINISHED / RUN_ERROR.
-    # PoC: single-uvicorn-worker, so a process-local dict on app.state
-    # is sufficient. Multi-worker future would need a shared store.
+    # Only RUN_STARTED / RUN_FINISHED / RUN_ERROR carry `runId`;
+    # intermediate frames correlate via messageId/toolCallId. Cache the
+    # active run per session on RUN_STARTED so intermediate frames key
+    # onto the right bus topic; clear on RUN_FINISHED / RUN_ERROR.
+    # Process-local dict — single uvicorn worker only.
     active_by_session: dict[str, str] | None = getattr(
         request.app.state, "active_run_by_session", None
     )
@@ -124,68 +111,63 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
     if not run_id:
         # Genuine orphan: a non-lifecycle frame arrived before any
         # RUN_STARTED was seen for this session. Buffer it instead of
-        # silent drop so the resume / replay path doesn't lose state.
+        # silently dropping so resume / replay does not lose state.
         if pending_by_session is not None:
             buf = pending_by_session.setdefault(session_id, [])
-            # Bound the buffer so a misbehaving runner can't OOM us.
+            # Bound the buffer so a misbehaving runner cannot OOM us.
             if len(buf) < _PRE_RUN_BUFFER_CAP:
                 buf.append(frame)
                 _diag(
-                    f"B-DIAG-EVENTS EVENTS BUFFERED (no active run): "
-                    f"type={frame_type} session_id={session_id} "
-                    f"buffered={len(buf)}"
+                    f"buffered (no active run): type={frame_type} "
+                    f"session_id={session_id} buffered={len(buf)}"
                 )
             else:
                 _diag(
-                    f"B-DIAG-EVENTS EVENTS DROPPED (buffer full): "
-                    f"type={frame_type} session_id={session_id} "
-                    f"cap={_PRE_RUN_BUFFER_CAP}"
+                    f"dropped (buffer full): type={frame_type} "
+                    f"session_id={session_id} cap={_PRE_RUN_BUFFER_CAP}"
                 )
         else:
             _diag(
-                f"B-DIAG-EVENTS EVENTS ORPHAN (no active run): "
-                f"type={frame_type} session_id={session_id} "
-                f"frame_keys={list(frame.keys())}"
+                f"orphan (no active run): type={frame_type} "
+                f"session_id={session_id} frame_keys={list(frame.keys())}"
             )
         return
 
     await bus.publish(session_id, str(run_id), frame)
     _diag(
-        f"B-DIAG-EVENTS EVENTS DISPATCHED: type={frame_type} "
-        f"-> event_bus.publish(sid={session_id}, rid={run_id})"
+        f"dispatched: type={frame_type} -> bus(sid={session_id}, "
+        f"rid={run_id})"
     )
 
-    # ISS-01: flush any pre-RUN_STARTED orphan buffer AFTER the RUN_STARTED
-    # frame itself reaches the bus, so subscribers observe RUN_STARTED at
-    # index 0 — the AG-UI 0.1.18 lifecycle contract that cursor-replay and
-    # resume rely on.
+    # Flush any pre-RUN_STARTED orphan buffer AFTER the RUN_STARTED frame
+    # itself reaches the bus, so subscribers observe RUN_STARTED at
+    # index 0 — cursor-replay and resume depend on this ordering.
     if frame_type == "RUN_STARTED" and pending_by_session is not None:
         pending = pending_by_session.pop(session_id, None)
         if pending:
             for buf in pending:
                 await bus.publish(session_id, str(run_id), buf)
             _diag(
-                f"B-DIAG-EVENTS EVENTS REPLAY FLUSH: "
-                f"session_id={session_id} count={len(pending)} "
-                f"run_id={run_id}"
+                f"replay flush: session_id={session_id} "
+                f"count={len(pending)} run_id={run_id}"
             )
 
     if (
         frame_type in ("RUN_FINISHED", "RUN_ERROR")
         and active_by_session is not None
     ):
-        # End-of-run cleanup so a stale run_id can't leak into the next
-        # run on this session. Compare-and-swap: only pop when the cached
-        # active run matches THIS terminal frame's run_id. A late
+        # End-of-run cleanup so a stale run_id cannot leak into the next
+        # run on this session. Compare-and-swap: only pop when the
+        # cached active run matches THIS terminal frame's run_id. A late
         # RUN_FINISHED(rA) racing a fresh RUN_STARTED(rB) on the same
         # session must NOT wipe B's mapping, or B's next intermediate
-        # frame would be misrouted as a spurious orphan (ISS-04).
+        # frame would be misrouted as a spurious orphan.
         if active_by_session.get(session_id) == str(run_id):
             active_by_session.pop(session_id, None)
 
 
-# Per-line cap on JSONL frames (reviewer-1 Low-3). 1 MiB is generous for
-# AG-UI events; anything larger is almost certainly a runaway/attack.
+# Per-line cap on JSONL frames. 1 MiB is generous for AG-UI events;
+# anything larger is almost certainly a runaway or attack.
 MAX_LINE_BYTES = 1 * 1024 * 1024
 
 # Cap on frames buffered per-session before RUN_STARTED is observed.
@@ -213,7 +195,7 @@ async def ingest_runner_events(
     total_bytes = 0
     chunk_count = 0
     buf = b""
-    _diag(f"B-DIAG-EVENTS EVENTS RX OPEN: session_id={sid}")
+    _diag(f"rx open: session_id={sid}")
     try:
         async for chunk in request.stream():
             buf += chunk
@@ -225,9 +207,9 @@ async def ingest_runner_events(
                 # every 10th. Helps confirm bytes are flowing even when no
                 # newline appears for a while.
                 _diag(
-                    f"B-DIAG-EVENTS EVENTS RX CHUNK: session_id={sid} "
-                    f"chunk_n={chunk_count} chunk_bytes={len(chunk)} "
-                    f"buf_bytes={len(buf)} total_bytes={total_bytes}"
+                    f"rx chunk: session_id={sid} chunk_n={chunk_count} "
+                    f"chunk_bytes={len(chunk)} buf_bytes={len(buf)} "
+                    f"total_bytes={total_bytes}"
                 )
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
@@ -242,10 +224,7 @@ async def ingest_runner_events(
                 try:
                     frame = json.loads(line)
                 except json.JSONDecodeError as e:
-                    _diag(
-                        f"B-DIAG-EVENTS EVENTS PARSE FAIL: "
-                        f"line={line[:200]!r} err={e}"
-                    )
+                    _diag(f"parse fail: line={line[:200]!r} err={e}")
                     raise HTTPException(
                         status_code=400, detail="invalid JSONL frame"
                     )
@@ -270,10 +249,7 @@ async def ingest_runner_events(
             try:
                 frame = json.loads(buf)
             except json.JSONDecodeError as e:
-                _diag(
-                    f"B-DIAG-EVENTS EVENTS PARSE FAIL (final): "
-                    f"line={buf[:200]!r} err={e}"
-                )
+                _diag(f"parse fail (final): line={buf[:200]!r} err={e}")
                 raise HTTPException(status_code=400, detail="invalid JSONL frame")
             count += 1
             await _dispatch_frame(request, sid, frame)
@@ -284,16 +260,16 @@ async def ingest_runner_events(
         # reconnect loop in `runner/channel.py` makes this non-fatal either
         # way.
         _diag(
-            f"B-DIAG-EVENTS EVENTS RX DISCONNECT: session_id={sid} "
-            f"bytes={total_bytes} chunks={chunk_count} frames={count}"
+            f"rx disconnect: session_id={sid} bytes={total_bytes} "
+            f"chunks={chunk_count} frames={count}"
         )
         if count == 0:
             return Response(status_code=499)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     _diag(
-        f"B-DIAG-EVENTS EVENTS RX CLOSE: session_id={sid} "
-        f"bytes={total_bytes} chunks={chunk_count} frames={count}"
+        f"rx close: session_id={sid} bytes={total_bytes} "
+        f"chunks={chunk_count} frames={count}"
     )
     return JSONResponse(
         content={"received": count},

@@ -1,8 +1,9 @@
-"""Audit log repository (Phase 1.B10).
+"""Audit log repository.
 
-Single source of truth for the 12-name vocabulary is
-`src.db.models.AuditEventType`. The `append` method takes a string but
-runtime-validates against `AUDIT_EVENT_TYPES` to catch typos in tests.
+Canonical event-type vocabulary lives in `src.db.models.AuditEventType`.
+`append` takes a string but runtime-validates it against
+`AUDIT_EVENT_TYPES` so a typo surfaces in tests rather than at the next
+audit query.
 """
 from __future__ import annotations
 

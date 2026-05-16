@@ -1,11 +1,11 @@
-"""Wrapper around `ag_ui.encoder.EventEncoder` and the FastAPI
-`StreamingResponse` used by `src/api/stream.py`. Centralises SSE framing
-so the route file stays a thin orchestrator.
+"""Wrapper around `ag_ui.encoder.EventEncoder` and FastAPI's
+`StreamingResponse`. Centralises SSE framing so the route stays a thin
+orchestrator.
 
-Events arrive on the in-proc bus as plain `dict` payloads (cheap to
-construct from the runner's JSONL frames). `EventEncoder.encode()`
-requires a Pydantic `BaseEvent` — we coerce dict → typed event via the
-`ag_ui.core.events.Event` discriminated union at this boundary (B-INFRA-SSE).
+Events arrive on the in-proc bus as plain dicts (cheap to construct
+from the runner's JSONL frames). `EventEncoder.encode()` requires a
+Pydantic `BaseEvent`, so we coerce dict → typed event via the
+`ag_ui.core.events.Event` discriminated union at this boundary.
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ def make_response(
 ) -> StreamingResponse:
     if EventEncoder is None or _EVENT_ADAPTER is None:
         raise RuntimeError(
-            "ag-ui-protocol not installed; dev-1's pyproject.toml must "
-            "include ag-ui-protocol==0.1.18 before SSE can run"
+            "ag-ui-protocol not installed; pyproject.toml must include "
+            "ag-ui-protocol==0.1.18 before SSE can run"
         )
     encoder = EventEncoder(accept=request.headers.get("accept"))
 

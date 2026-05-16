@@ -1,16 +1,14 @@
-"""HMAC-SHA256 signing + verification for the runner→backend webhook
-(Phase 1.C-1.3, Contract C §C6).
+"""HMAC-SHA256 signing + verification for runner→backend webhooks.
 
 Canonicalization (shared by sender and receiver):
-    signing_input = f"{ts}.{body}"                  # ts is unix-ms int
+
+    signing_input = f"{ts}.{body}"           # ts is unix-ms int
     signature_b64 = base64( HMAC_SHA256(secret, signing_input) )
     Authorization = f"HMAC {signature_b64}"
 
-Replay window: 60 s on the receiver side (AC11).
-
-Both functions live here so dev-2 (runner-side signer) imports
-`sign_for_test` for unit tests and QA imports it for e2e tests — no
-duplication of the algorithm.
+Replay window: 60 s on the receiver. Both `sign_for_test` and
+`verify_hmac_signature` live in one module so signers and verifiers
+share a single canonical algorithm.
 """
 from __future__ import annotations
 

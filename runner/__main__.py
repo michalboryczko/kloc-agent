@@ -1,15 +1,16 @@
-"""Runner entrypoint. Plan task D10.
+"""Runner entrypoint.
 
-  1. read hydration JSON from `/run/kloc/hydration.json`
-  2. open `MCPClient`(s) in `with` (lifecycle == whole run, plan R11)
-  3. build agent via agent_factory
+  1. read hydration JSON from the path supplied via `KLOC_HYDRATION_PATH`
+  2. open `MCPClient`(s) in a `with` scope (lifecycle == whole run)
+  3. build the Strands agent via `agent_factory`
   4. wrap in `ag_ui_strands.StrandsAgent`
-  5. enter `iter_inbound()` long-poll loop
+  5. enter the `iter_inbound()` long-poll loop
   6. on each user message, call `agui_agent.run(RunAgentInput)` and
      `await channel.emit(event)` per yielded AG-UI event.
 
-The MCP `with` scope wraps the whole event loop so MCPClient subprocess
-death == runner exit (R11)."""
+The MCP `with` scope wraps the whole event loop so an MCPClient
+subprocess death is equivalent to a runner exit.
+"""
 
 from __future__ import annotations
 
@@ -164,7 +165,7 @@ async def _run_one_turn(
     # on the first turn of a warm container; on subsequent turns the
     # backend has already persisted prior assistant replies + new
     # user turn and pushes the cumulative list itself, so prepending
-    # `prior_messages` would duplicate turn 0 (reviewer-2 I4).
+    # `prior_messages` would duplicate turn 0.
     if first_turn:
         messages = list(payload.get("prior_messages") or [])
         messages.extend(inbound.get("messages") or [])

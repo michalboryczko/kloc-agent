@@ -1,11 +1,11 @@
-"""Streaming SSE endpoints. dev-2-owned half of Track C.
+"""Streaming SSE endpoints.
 
 Two routes:
   - `POST /v1/sessions/{id}/stream` — body is `RunAgentInput`; backend
     persists the user message, spawns/reuses the runner, sends the
     inbound message, and streams AG-UI events back as SSE.
-  - `GET /v1/sessions/{id}/stream?run_id=...&last_event_id=...` — replay
-    + tail an in-flight run for reconnects (AC5, AC18).
+  - `GET /v1/sessions/{id}/stream?run_id=...&last_event_id=...` —
+    cursor replay + tail an in-flight run for reconnects.
 """
 
 from __future__ import annotations
@@ -51,8 +51,8 @@ async def stream_post(
     request: Request,
     session_id: str = Path(...),
 ):
-    """Persist the user message FIRST (Contract A invariant #1), then
-    forward to runner, then stream the AG-UI events back."""
+    """Persist the user message BEFORE forwarding to the runner, then
+    stream the AG-UI events back."""
     body = await request.json()
     run_id = body.get("runId") or body.get("run_id") or str(uuid.uuid4())
     messages = body.get("messages") or []
@@ -64,16 +64,15 @@ async def stream_post(
             detail=f"invalid session_id {session_id!r} — must be a UUID",
         )
 
-    # Fail fast on registry unavailability (lifespan boot failure)
-    # BEFORE persisting the user message. Otherwise we end up with a
-    # half-committed transaction: user message persisted, runner never
-    # spawned; retry would replay the message via `prior_messages` in
-    # the next hydration and the user sees their own input duplicated
-    # (WR-03). Persistence still happens BEFORE forwarding to the runner
-    # (Contract A invariant #1), just AFTER the registry health check.
+    # Fail fast on registry unavailability BEFORE persisting the user
+    # message. Otherwise we end up with a half-committed transaction:
+    # message persisted, runner never spawned; the retry would replay
+    # the message via `prior_messages` and the user would see their own
+    # input duplicated. Persistence still happens BEFORE forwarding to
+    # the runner — just AFTER the registry health check.
     registry = _get_runner_registry(request)
 
-    # Contract A #1: persist user message + commit BEFORE forwarding.
+    # Persist + commit the user message BEFORE forwarding to the runner.
     await _persist_user_message(session_uuid, messages)
     hydration_payload = await _build_hydration_payload(
         session_id=session_id,
@@ -104,14 +103,12 @@ async def stream_post(
             }
         )
 
-        # ISS-02: dedup persister spawn by (session_id, run_id). Two
+        # Dedup the persister task by (session_id, run_id). Two
         # concurrent POST /stream calls for the same in-flight run must
         # NOT subscribe two persisters onto the same bus topic — that
         # double-counts every event in the execution ring and races two
-        # `message_uuid` dicts on the first delta. The bus already
-        # supports many SSE subscribers per topic, so the second caller
-        # still gets a fresh `event_bus.consume` over the same queue it
-        # just registered above; only the persister is shared.
+        # `message_uuid` dicts on the first delta. SSE consumers still
+        # get their own queue; only the persister is shared.
         execution = await execution_registry.get_or_create(
             session_id, run_id
         )
@@ -157,7 +154,7 @@ async def stream_get(
     run_id: Optional[str] = Query(None),
     last_event_id: Optional[int] = Query(None, alias="last_event_id"),
 ):
-    """Cursor replay + live tail. AC5 + AC18."""
+    """Cursor replay + live tail of an in-flight run."""
     if run_id is None:
         raise HTTPException(status_code=400, detail="run_id required")
     execution = await execution_registry.get(session_id, run_id)
@@ -226,17 +223,13 @@ async def _persist_events(
     run_id: str,
     execution,
 ) -> None:
-    """Tap the event_bus, push every event onto the execution ring AND
-    drive `TextDeltaDebouncer` for Contract A invariant #2.
+    """Tap the event bus, push every event onto the execution ring, and
+    drive `TextDeltaDebouncer` so durable persistence happens alongside
+    SSE delivery.
 
-    Multiple subscribers on the bus is supported (live SSE clients also
-    subscribe in parallel). This task's role is durable persistence.
-
-    Connection lifetime: previously each TEXT_MESSAGE_CONTENT delta
-    opened + closed a fresh AsyncSession, saturating the asyncpg pool
-    under N concurrent sessions. We now hold one AsyncSession for the
-    coroutine's lifetime and commit per delta. The pool checkout is
-    O(1) per run instead of O(deltas).
+    Holds one AsyncSession for the coroutine's lifetime and commits per
+    delta; opening a fresh session per delta saturated the asyncpg pool
+    under N concurrent sessions.
     """
     sessionmaker = get_sessionmaker()
     # AG-UI messageId (str) -> Postgres message UUID for append_delta.
@@ -276,25 +269,20 @@ async def _persist_events(
         )
 
         # Per-event idle timeout. If the runner crashes without emitting
-        # a terminal frame and the registry's heartbeat watcher doesn't
-        # synthesize one onto the bus, the previous code parked forever
-        # in `event_bus.subscribe`, holding its asyncpg session checked
-        # out indefinitely (WR-02). Cap each await on the bus at the
-        # heartbeat-timeout window + grace so the persister releases its
-        # session even when no terminal frame ever arrives. Tuned wide
-        # enough that no normal between-event gap will trip it.
+        # a terminal frame and the heartbeat watcher does not synthesize
+        # one, parking forever in `event_bus.subscribe` would hold the
+        # asyncpg session checked out indefinitely. Cap each await at
+        # the heartbeat-timeout window + grace.
         settings = get_settings()
         idle_budget_s = (
             float(getattr(settings, "runner_heartbeat_timeout_s", 30)) + 30.0
         )
 
         # essential=True: the persister gets an unbounded queue so the
-        # slow-subscriber sentinel cannot drop it mid-run. Pre-fix, a
-        # transient DB stall could saturate the persister's 10k-cap
-        # queue, hit the sentinel branch in event_bus.publish, and
-        # silently stop persisting halfway through a run -- divergence
-        # between the SSE client (who saw everything) and the DB (who
-        # only saw the prefix). WR-07.
+        # slow-subscriber sentinel cannot drop it mid-run. A transient
+        # DB stall must not let `event_bus.publish` silently stop
+        # persisting while SSE clients keep receiving — that would
+        # leave the DB with only a prefix of the run.
         bus_iter = event_bus.subscribe(
             session_id, run_id, essential=True
         ).__aiter__()

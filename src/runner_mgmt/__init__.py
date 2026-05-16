@@ -1,12 +1,9 @@
 """Runner management package.
 
-Public surface (used by dev-1's `src/main.py` lifespan):
+Public surface:
 - `RunnerRegistry` — per-session container registry
-- `DockerRunner` — aiodocker-based concrete `Runner` impl
-- `sweeper.orphan_sweep` — boot-time orphan-container sweep (AC25)
-
-dev-1 imports `RunnerRegistry` and `sweeper` here. Other names are
-re-exported for explicitness."""
+- `sweeper.orphan_sweep` — boot-time orphan-container sweep
+"""
 
 from src.runner_mgmt.registry import RunnerRegistry  # noqa: F401
 from src.runner_mgmt import sweeper  # noqa: F401

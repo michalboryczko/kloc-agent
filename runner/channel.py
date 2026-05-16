@@ -1,4 +1,4 @@
-"""Runner <-> backend channel. Plan task D16.
+"""Runner ↔ backend channel.
 
 Three flows:
   * outbound: `emit(event)` enqueues; a background task streams events
@@ -69,14 +69,12 @@ class BackendChannel:
         self._busy = busy
 
     async def emit(self, event: dict) -> None:
-        # B-DIAG-B: log every emit at the channel boundary so we can
-        # trace whether AG-UI events from the Strands stream loop are
-        # reaching the outbound queue at all. Cheap: rare enough not to
-        # spam (per-AG-UI-event, not per-byte) and helpful for diagnosing
-        # the assistant-message-not-persisted gap.
+        # Per-event log at the channel boundary so we can trace whether
+        # AG-UI events from the Strands stream loop are reaching the
+        # outbound queue. Rate is per-event, not per-byte.
         evt_type = event.get("type", "<unknown>")
         log.info(
-            "CHANNEL EMIT: type=%s run_id=%s busy=%s",
+            "channel emit: type=%s run_id=%s busy=%s",
             evt_type,
             self._run_id_provider() if callable(self._run_id_provider) else None,
             self._busy,
@@ -122,13 +120,11 @@ class BackendChannel:
 
     async def _stream_outbound(self) -> None:
         """Single chunked POST whose body is a long-lived JSONL stream.
-        Plan §401.
 
         Reconnect loop: on any transport-level exception, log + backoff
-        and re-establish the stream. The previous one-shot version
-        permanently silenced this runner on a single transient backend
-        close, surfacing on the backend side as `ClientDisconnect` and
-        causing missing terminal frames downstream.
+        and re-establish the stream. A single transient backend close
+        must not permanently silence the runner — that path used to
+        cause missing terminal frames downstream.
         """
         assert self._http is not None
         url = (
@@ -158,11 +154,11 @@ class BackendChannel:
             # Drain the cross-attempt buffer first. Pop AFTER recording
             # the event in `yielded_this_attempt` and BEFORE the yield,
             # so an exception raised by the consumer mid-yield still
-            # leaves the frame visible to recovery. The pop must come
-            # before the yield as well: if it ran after, an exception
-            # mid-replay would leave the frame in BOTH
-            # pending_after_break AND yielded_this_attempt and the
-            # recovery would duplicate it on the next attempt (WR-04).
+            # leaves the frame visible to recovery. If the pop ran
+            # AFTER the yield, an exception mid-replay would leave the
+            # frame in BOTH `pending_after_break` AND
+            # `yielded_this_attempt`, and recovery would duplicate it
+            # on the next attempt.
             while pending_after_break:
                 event = pending_after_break.pop(0)
                 yielded_this_attempt.append(event)
@@ -176,10 +172,10 @@ class BackendChannel:
                 yielded_this_attempt.append(event)
                 line = (json.dumps(event) + "\n").encode("utf-8")
                 log.info(
-                    "CHANNEL SEND: type=%s bytes=%d",
+                    "channel send: type=%s bytes=%d",
                     event.get("type", "<unknown>"),
                     len(line),
-                )  # B-DIAG-B
+                )
                 yield line
 
         backoff = 0.5
@@ -187,7 +183,7 @@ class BackendChannel:
         sentinel_seen = False
 
         while not sentinel_seen:
-            log.info("CHANNEL STREAM OPENING -> %s", url)  # B-DIAG-B
+            log.info("channel stream opening -> %s", url)
             try:
                 async with self._http.stream(
                     "POST",
@@ -200,24 +196,24 @@ class BackendChannel:
                     timeout=None,
                 ) as response:
                     log.info(
-                        "CHANNEL STREAM OPEN <- %s [status=%d]",
+                        "channel stream open <- %s [status=%d]",
                         url,
                         response.status_code,
-                    )  # B-DIAG-B
+                    )
                     if response.status_code >= 400:
                         log.error(
                             "channel.outbound_bad_status",
                             extra={"status": response.status_code},
                         )
                         # 4xx/5xx: backend rejected this attempt. Every
-                        # frame body_iter yielded during this attempt is
-                        # at risk of loss across the TCP boundary, so
-                        # prepend the WHOLE attempt transcript -- not
-                        # just the most recent one (CR-02). Then also
-                        # drain whatever is still queued so the next
-                        # attempt's body_iter replays everything in
-                        # order: yielded-but-unacknowledged first, then
-                        # queue tail.
+                        # frame `body_iter` yielded during this attempt
+                        # is at risk of loss across the TCP boundary,
+                        # so prepend the WHOLE attempt transcript —
+                        # not just the most recent frame. Then drain
+                        # whatever is still queued so the next
+                        # attempt's `body_iter` replays in order:
+                        # yielded-but-unacknowledged first, then queue
+                        # tail.
                         pending_after_break[:0] = yielded_this_attempt
                         yielded_this_attempt.clear()
                         while True:

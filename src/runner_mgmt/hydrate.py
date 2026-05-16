@@ -1,28 +1,13 @@
-"""Hydration writer + aiodocker mount builder. Plan task D4 (AC16).
+"""Hydration writer + aiodocker mount builder.
 
-B-INFRA-3 fix: switched from a host-path bind mount to a shared named
-volume. The previous design wrote `/tmp/hydration-<rid>.json` inside the
-backend container and passed that container-local path to aiodocker as
-a bind source — but aiodocker forwards the path to the host Docker
-daemon, which resolves it host-side. The file lived in the backend
-container, not the host, so every spawn 400'd with "bind source path
-does not exist".
-
-The new design:
-
-  * docker-compose mounts named volume `kloc-hydration` into the backend
-    at `/tmp/kloc-hydration` (RW) and is declared as a top-level volume.
-  * `write_hydration_tempfile` writes
-    `/tmp/kloc-hydration/<runner_id>.json` inside the backend.
-  * `build_hydration_mount` returns a `Type: volume` entry mounting the
-    SAME named volume at `/run/kloc` inside each runner container (RO).
-  * Runner reads `/run/kloc/<runner_id>.json` — the path that is now
-    exported via `KLOC_HYDRATION_PATH` env (per-spawn, not the legacy
-    fixed `/run/kloc/hydration.json` shared-name path).
-
-The volume is shared by reference (Docker storage layer), so no
-host-path resolution is needed and the same content surfaces under
-the runner's mountpoint immediately."""
+A shared named volume `kloc-hydration` is mounted into both the backend
+(`/tmp/kloc-hydration`, RW) and each runner (`/run/kloc`, RO). The
+backend writes `<runner_id>.json` to the volume; the runner reads it via
+`KLOC_HYDRATION_PATH`. A bind-mount design fails here because aiodocker
+forwards bind sources to the host Docker daemon, which resolves them
+host-side — files written inside the backend container do not exist on
+the host.
+"""
 
 from __future__ import annotations
 
@@ -105,9 +90,8 @@ def write_hydration_tempfile(runner_id: str, payload: Any) -> Path:
 
 
 def cleanup_hydration_tempfile(runner_id: str) -> None:
-    """Called from DockerRunner.terminate after container.wait() returns
-    (Contract D §549). Removes the per-runner file from the shared
-    named volume."""
+    """Remove the per-runner hydration file from the shared named volume.
+    Called from `DockerRunner.terminate` after `container.wait()` returns."""
     path = _backend_path_for(runner_id)
     try:
         path.unlink(missing_ok=True)
@@ -121,8 +105,7 @@ def build_hydration_mount() -> dict:
     Mounting the directory (not the individual file) means every runner
     container can see every pending hydration file on the volume — but
     each runner reads only the file at its own `KLOC_HYDRATION_PATH`
-    env, so there's no cross-pollination. Cleaner than per-file mounts
-    and avoids the legacy host-path resolution bug entirely (B-INFRA-3)."""
+    env, so there is no cross-pollination."""
     return {
         "Type": "volume",
         "Source": _hydration_volume_name(),
@@ -134,13 +117,11 @@ def build_hydration_mount() -> dict:
 def build_skills_mount(host_skills_dir: str) -> dict:
     """Skills directory mount via shared named volume `kloc-skills`.
 
-    B-INFRA-3 audit point 1: the legacy bind-mount of `Path(host_skills
-    _dir).resolve()` had the same host/container path-resolution bug as
-    the hydration tempfile — `./skills` resolved inside the backend
-    container to `/app/skills`, which the host Docker daemon couldn't
-    find. The named volume approach matches the hydration fix; compose
-    seeds the volume from the repo root via an init container (see
-    `docker-compose.yml` mc-init-style skill seeder)."""
+    A bind-mount of `Path(host_skills_dir).resolve()` would hit the same
+    host/container path-resolution problem the hydration tempfile does
+    (paths resolved inside the backend container do not exist on the
+    host). The named-volume approach sidesteps that entirely; compose
+    seeds the volume from the repo root via an init container."""
     return {
         "Type": "volume",
         "Source": os.environ.get("KLOC_SKILLS_VOLUME", "kloc-skills"),
