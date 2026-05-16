@@ -23,13 +23,6 @@ export function AgentBody({ initialMessages }: AgentBodyProps) {
     initialState: { artifacts: [] },
   });
 
-  // CopilotKit 1.56 has no public way to seed the sidebar's message
-  // buffer (the documented `useCopilotChat({ initialMessages })` is not
-  // wired through, and `useAgent.setMessages()` populates v2's store
-  // which the v1 `<CopilotSidebar>` doesn't read). The runner's first
-  // MESSAGES_SNAPSHOT brings prior history into the sidebar when the
-  // user sends their next message — we surface a hint below so the
-  // user knows what to expect.
   const priorCount = initialMessages?.length ?? 0;
 
   useCopilotAction({
@@ -55,37 +48,20 @@ export function AgentBody({ initialMessages }: AgentBodyProps) {
   });
 
   return (
-    <section
-      style={{
-        flex: 1,
-        padding: 24,
-        fontSize: 14,
-        opacity: 0.8,
-        lineHeight: 1.5,
-      }}
-    >
+    <section className="flex-1 p-6 text-sm leading-relaxed text-[var(--text-mute)]">
       <p>
         Ask a question about the indexed PHP codebase. The chat sidebar will
         stream the agent&apos;s reasoning, MCP tool calls, and final answer.
       </p>
       {priorCount > 0 && (
-        <p
-          style={{
-            marginTop: 12,
-            padding: "8px 12px",
-            background: "rgba(80, 130, 220, 0.08)",
-            border: "1px solid rgba(80, 130, 220, 0.25)",
-            borderRadius: 6,
-            fontSize: 13,
-          }}
-        >
+        <p className="mt-3 rounded-md border border-[var(--accent-line)] bg-[var(--accent-soft)] px-3 py-2 text-[13px] text-[var(--text)]">
           Resumed session — {priorCount} prior message
           {priorCount === 1 ? "" : "s"} will appear in the chat once you send
           your next message.
         </p>
       )}
       {state?.artifacts && state.artifacts.length > 0 && (
-        <ul>
+        <ul className="mt-4 space-y-1 font-mono text-[12.5px] text-[var(--text-mute)]">
           {state.artifacts.map((a) => (
             <li key={a.id}>{a.filename}</li>
           ))}
