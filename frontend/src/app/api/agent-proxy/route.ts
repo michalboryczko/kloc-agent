@@ -1,29 +1,21 @@
-// agent-proxy: the AG-UI envelope builder + SSE forwarder.
+// agent-proxy: AG-UI envelope builder + SSE forwarder.
 //
-// CopilotKit's `HttpAgent` POSTs a raw call shape (with `messages`, `tools`,
-// `context`, `state`, `forwardedProps`) — it does NOT natively speak
-// AG-UI's `RunAgentInput`. This proxy:
-//
-//   1. Reads CopilotKit's POST body.
-//   2. Ensures every message has a UUID id (AG-UI requirement).
-//   3. Builds a canonical `RunAgentInput` (threadId, runId, messages, tools,
-//      context, state, forwardedProps).
-//   4. POSTs it to the FastAPI backend's
-//      `POST /v1/sessions/{session_id}/stream` with
-//      `Accept: text/event-stream`.
-//   5. Streams the SSE response back to the browser unmodified.
-//
-// Reconnect: if the request body carries a `last_event_id` (the AG-UI
-// resume cursor), it's appended as a URL parameter so the backend can
-// replay the tail of the run before resuming live emission.
-//
-// Lifted from CopilotKit/CopilotKit @ examples/integrations/strands-python
-// (research/05-reference-projects.md, Repo 4). Adapted for our
-// `/v1/sessions/{id}/stream` URL shape (Contract A) and our
-// `session_id`-bearing `forwardedProps`.
+// Reads CopilotKit's POST body, validates shape, builds a canonical
+// RunAgentInput envelope, and forwards to FastAPI's
+// POST /v1/sessions/{session_id}/stream with Accept: text/event-stream.
+// The SSE response is streamed back to the browser unmodified.
 
 import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
+import {
+  ensureMessageIds,
+  resolveSessionId,
+  validateIncomingBody,
+} from "./validation";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 const BACKEND_URL =
   process.env.BACKEND_URL ??
@@ -32,60 +24,18 @@ const BACKEND_URL =
 
 const AGENT_NAME = process.env.COPILOTKIT_AGENT_NAME ?? "kloc_agent";
 
-type IncomingMessage = {
-  id?: string;
-  role: string;
-  content?: unknown;
-  // ag-ui-protocol 0.1.18 message shape is loose at this layer; the backend
-  // re-parses via pydantic.
-  [key: string]: unknown;
-};
-
-type IncomingBody = {
-  threadId?: string;
-  runId?: string;
-  messages?: IncomingMessage[];
-  tools?: unknown[];
-  context?: unknown[];
-  state?: Record<string, unknown>;
-  forwardedProps?: Record<string, unknown>;
-  properties?: Record<string, unknown>;
-  lastEventId?: string;
-};
-
-// CopilotKit identifies the agent by name in `forwardedProps`; we also use
-// it to discover the backend `session_id` (the page bootstraps a session and
-// passes the id to `useCoAgent`'s state).
-function resolveSessionId(body: IncomingBody): string | null {
-  const props = body.properties ?? {};
-  const fwd = body.forwardedProps ?? {};
-  const state = body.state ?? {};
-  const candidate =
-    (props["session_id"] as string | undefined) ??
-    (fwd["session_id"] as string | undefined) ??
-    (fwd["sessionId"] as string | undefined) ??
-    (state["session_id"] as string | undefined);
-  return candidate ?? null;
-}
-
-function ensureMessageIds(messages: IncomingMessage[] | undefined): IncomingMessage[] {
-  if (!messages) return [];
-  return messages.map((m) => ({
-    ...m,
-    id: m.id && m.id.length > 0 ? m.id : randomUUID(),
-  }));
-}
+const UPSTREAM_TIMEOUT_MS = 30_000;
 
 export const GET = async () => {
-  // CopilotRuntime probes the agent metadata on registration. We return the
-  // configured name so it can be discovered by the runtime registry.
+  // CopilotRuntime probes agent metadata on registration; return the
+  // configured name so the runtime registry can discover it.
   return Response.json({ id: AGENT_NAME, name: AGENT_NAME });
 };
 
 export const POST = async (req: NextRequest) => {
-  let body: IncomingBody;
+  let parsed: unknown;
   try {
-    body = (await req.json()) as IncomingBody;
+    parsed = await req.json();
   } catch {
     return Response.json(
       { error: "agent-proxy: invalid JSON body" },
@@ -93,14 +43,26 @@ export const POST = async (req: NextRequest) => {
     );
   }
 
+  const result = validateIncomingBody(parsed);
+  if (!result.ok) {
+    return Response.json(
+      { error: `agent-proxy: invalid body: ${result.reason}` },
+      { status: 400 },
+    );
+  }
+
+  const body = result.body;
   const sessionId = resolveSessionId(body);
   if (!sessionId) {
-    // DIAG: dump the keys we see so we can wire up the new CopilotKit
-    // state-forwarding contract.
-    console.warn("[agent-proxy] no session_id; body keys=", Object.keys(body), {
-      state: body.state,
-      forwardedProps: body.forwardedProps,
-    });
+    if (process.env.NEXT_PUBLIC_DEBUG_HTTP === "true") {
+      // Diagnostic: emit only key names, never values. Body state/forwardedProps
+      // can contain user-supplied text or secrets in misconfigured clients.
+      console.warn("[agent-proxy] no session_id; keys=", {
+        body: Object.keys(body),
+        state: Object.keys(body.state ?? {}),
+        forwardedProps: Object.keys(body.forwardedProps ?? {}),
+      });
+    }
     return Response.json(
       {
         error:
@@ -114,11 +76,6 @@ export const POST = async (req: NextRequest) => {
   const threadId = body.threadId ?? sessionId;
   const runId = body.runId ?? randomUUID();
 
-  // Canonical AG-UI 0.1.18 RunAgentInput shape. The JS SDK and Repo 4's
-  // proxy use camelCase; ag-ui-protocol's Pydantic model uses snake_case
-  // but is configured with field aliases (ConfiguredBaseModel) so either
-  // form deserialises. If the backend rejects this, switch to snake_case
-  // (thread_id, run_id, forwarded_props) — keep this as the trip-wire.
   const runAgentInput = {
     threadId,
     runId,
@@ -134,34 +91,76 @@ export const POST = async (req: NextRequest) => {
     url.searchParams.set("last_event_id", body.lastEventId);
   }
 
-  const upstream = await fetch(url.toString(), {
-    method: "POST",
-    headers: {
-      Accept: "text/event-stream",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(runAgentInput),
-    // Forward client disconnects so the backend can drop the SSE generator
-    // and free runner resources.
-    signal: req.signal,
-  });
+  // Combine the client-disconnect signal with a 30s timeout so a slow
+  // backend cannot tie up a Node worker indefinitely.
+  const signal = AbortSignal.any([
+    req.signal,
+    AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+  ]);
 
-  if (!upstream.ok || !upstream.body) {
-    const text = await upstream.text().catch(() => "");
-    return new Response(
-      `agent-proxy: backend rejected (${upstream.status}): ${text}`,
-      {
-        status: upstream.status,
-        // Backend may return HTML (FastAPI debug pages), JSON, or plain
-        // text. Force text/plain so the browser doesn't try to render
-        // an error body as HTML inside the chat shell.
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
+  let upstream: Response;
+  try {
+    upstream = await fetch(url.toString(), {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify(runAgentInput),
+      signal,
+    });
+  } catch (err) {
+    // AbortError covers both client-disconnect and the timeout case.
+    const isAbort = err instanceof Error && err.name === "AbortError";
+    const isTimeout = req.signal.aborted ? false : isAbort;
+    if (isTimeout) {
+      console.error("[agent-proxy] upstream timeout", {
+        url: url.toString(),
+        timeoutMs: UPSTREAM_TIMEOUT_MS,
+      });
+      return Response.json(
+        { error: "agent-proxy: upstream timeout" },
+        { status: 504 },
+      );
+    }
+    if (isAbort) {
+      // Client went away before upstream responded — nothing to send back.
+      return new Response(null, { status: 499 });
+    }
+    console.error("[agent-proxy] upstream fetch failed", {
+      url: url.toString(),
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return Response.json(
+      { error: "agent-proxy: upstream unreachable" },
+      { status: 502 },
     );
   }
 
-  // Forward the SSE body verbatim. The browser's EventSource/CopilotRuntime
-  // consumes the same wire format the backend produced.
+  if (!upstream.ok || !upstream.body) {
+    // Drain upstream body for server logs (truncated) but never echo it
+    // back to the browser — backend stack traces / debug HTML would land
+    // in the chat UI.
+    const preview = await upstream
+      .text()
+      .then((t) => t.slice(0, 256))
+      .catch(() => "");
+    console.error("[agent-proxy] upstream rejected", {
+      status: upstream.status,
+      url: url.toString(),
+      preview,
+    });
+    return Response.json(
+      {
+        error: "agent-proxy: backend rejected",
+        status: upstream.status,
+      },
+      { status: upstream.status },
+    );
+  }
+
+  // Forward the SSE body verbatim. The browser's EventSource consumer
+  // sees the same wire format the backend produced.
   return new Response(upstream.body, {
     status: 200,
     headers: {
