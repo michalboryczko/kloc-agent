@@ -15,7 +15,7 @@
 | 2 | Backend settings & boot contract | 3/3 | Complete   | 2026-05-16 |
 | 3 | Backend cleanup & comment sweep | 5/5 | Complete   | 2026-05-16 |
 | 4 | UI foundations & component reskin | 2/2 | Complete   | 2026-05-16 |
-| 5 | UI structural fix, polish, a11y | Replace `<CopilotSidebar>` with inline `<CopilotChat>` + `SessionRail`; ship polish + a11y + dead-code deletion | UI-P3, UI-P4, UI-P5, UI-P6 | 4 |
+| 5 | UI structural fix, polish, a11y | 4/4 | Complete   | 2026-05-16 |
 | 6 | Frontend code quality | Resolve the 36 findings across the 7 `docs/reviews/frontend/` category files (perf, bundle, server/routes, fetching, security, code-quality) | FE-PERF, FE-BUNDLE, FE-ROUTES, FE-DATA, FE-SEC, FE-QUALITY | 5 |
 
 **Coverage:** 26 / 26 v1 requirements mapped ✓
