@@ -411,17 +411,11 @@ async def _build_hydration_payload(
         "final answers. Cite symbol FQNs verbatim."
     )
 
-    # Contract D pivot: agent reaches kloc-intelligence over Streamable
-    # HTTP MCP, NOT via a stdio child. The operator brings up the
-    # kloc-intelligence stack (Neo4j + Qdrant + `kloc-intelligence
-    # mcp-server-http`) out of band; the agent treats it as an opaque
-    # MCP endpoint. `settings.kloc_mcp_url` defaults to
-    # `http://host.docker.internal:8765/mcp` and is overridable by env.
-    # Fallback to that string literal until dev-1's settings field
-    # ships in parallel.
-    mcp_url = getattr(
-        settings, "kloc_mcp_url", "http://host.docker.internal:8765/mcp"
-    )
+    # Agent reaches kloc-intelligence over Streamable HTTP MCP, not via
+    # a stdio child. The operator brings up the kloc-intelligence stack
+    # (Neo4j + Qdrant + `kloc-intelligence mcp-server-http`) out of
+    # band; the agent treats it as an opaque MCP endpoint.
+    mcp_url = settings.kloc_mcp_url
 
     # Provider + model_id come from Settings only. Per-request env reads
     # were a silent-override path that could route a session to a provider
