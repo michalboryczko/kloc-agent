@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: Phase 1 (pending — discuss/plan/execute not yet run)
+current_phase: 1
 status: unknown
-last_updated: "2026-05-16T00:16:44.704Z"
+last_updated: "2026-05-16T00:29:07.722Z"
 progress:
   total_phases: 6
   completed_phases: 0
@@ -21,7 +21,7 @@ See: `.planning/PROJECT.md` (updated 2026-05-16)
 
 **Core value:** A single analyst can have a live, resumable, audit-complete agent conversation against an indexed codebase — and trust that every event, message, and tool call is reliably persisted, ordered correctly, and never silently dropped.
 
-**Current focus:** Phase 1 — Backend AG-UI & runner correctness (not yet started)
+**Current focus:** Phase 1 — Backend AG-UI & runner correctness
 
 ---
 
@@ -29,7 +29,7 @@ See: `.planning/PROJECT.md` (updated 2026-05-16)
 
 **Milestone:** Hardening — internal beta / demo-stable
 **Started:** 2026-05-16
-**Current phase:** Phase 1 (pending — discuss/plan/execute not yet run)
+**Current phase:** 1
 **Phases complete:** 0 / 6
 **Requirements complete:** 0 / 26
 
