@@ -14,17 +14,22 @@
     "@copilotkit/react-core": "1.56.5",
     "@copilotkit/react-ui": "1.56.5",
     "@copilotkit/runtime": "1.56.5",
+    "clsx": "^2.1.1",
     "next": "16.0.8",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
+    "tailwind-merge": "^3.6.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "eslint": "^9.16.0",
     "eslint-config-next": "16.0.8",
+    "tailwindcss": "^4.3.0",
+    "tailwindcss-animate": "^1.0.7",
     "typescript": "^5.6.0"
   }
 }
