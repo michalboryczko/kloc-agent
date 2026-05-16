@@ -276,16 +276,51 @@ async def _persist_events(
             append_delta=_append_delta, finalize=_finalize
         )
 
-        async for event in event_bus.subscribe(session_id, run_id):
-            wire = normalize(event)
-            execution.append(wire)
-            kind = wire.get("type")
-            if kind == "TEXT_MESSAGE_CONTENT":
-                await debouncer.on_content(wire["messageId"], wire["delta"])
-            elif kind == "TEXT_MESSAGE_END":
-                await debouncer.on_end(wire["messageId"])
-            if is_run_lifecycle_terminal(wire):
-                return
+        # Per-event idle timeout. If the runner crashes without emitting
+        # a terminal frame and the registry's heartbeat watcher doesn't
+        # synthesize one onto the bus, the previous code parked forever
+        # in `event_bus.subscribe`, holding its asyncpg session checked
+        # out indefinitely (WR-02). Cap each await on the bus at the
+        # heartbeat-timeout window + grace so the persister releases its
+        # session even when no terminal frame ever arrives. Tuned wide
+        # enough that no normal between-event gap will trip it.
+        settings = get_settings()
+        idle_budget_s = (
+            float(getattr(settings, "runner_heartbeat_timeout_s", 30)) + 30.0
+        )
+
+        bus_iter = event_bus.subscribe(session_id, run_id).__aiter__()
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(
+                        bus_iter.__anext__(), timeout=idle_budget_s
+                    )
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "stream.persister_idle_timeout session=%s run=%s "
+                        "budget_s=%.1f; runner likely crashed without "
+                        "terminal frame",
+                        session_id,
+                        run_id,
+                        idle_budget_s,
+                    )
+                    return
+                except StopAsyncIteration:
+                    return
+                wire = normalize(event)
+                execution.append(wire)
+                kind = wire.get("type")
+                if kind == "TEXT_MESSAGE_CONTENT":
+                    await debouncer.on_content(
+                        wire["messageId"], wire["delta"]
+                    )
+                elif kind == "TEXT_MESSAGE_END":
+                    await debouncer.on_end(wire["messageId"])
+                if is_run_lifecycle_terminal(wire):
+                    return
+        finally:
+            await bus_iter.aclose()
 
 
 def _log_persist_task_result(task: asyncio.Task) -> None:
