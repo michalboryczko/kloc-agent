@@ -32,9 +32,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.db.base import Base
 
 
-# ---------------------------------------------------------------------------
-# Audit event vocabulary — LOCKED (plan § Audit event vocabulary)
-# ---------------------------------------------------------------------------
+# Audit event vocabulary is locked: every value must be a documented event.
+# Adding a new event requires a corresponding write site plus a downstream
+# consumer (otherwise it is dead audit weight).
 
 AuditEventType = Literal[
     "session_opened",

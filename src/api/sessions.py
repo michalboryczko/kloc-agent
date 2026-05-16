@@ -27,7 +27,7 @@ from src.repos.sessions import SessionRepo
 router = APIRouter(tags=["sessions"])
 
 
-# PoC: single hardcoded analyst (spec § Out of scope: multi-tenant auth).
+# Single-analyst PoC: multi-tenant auth is intentionally out of scope.
 HARDCODED_ANALYST_ID = "analyst-poc"
 
 

@@ -38,5 +38,5 @@ async def presigned_get(
 
 
 def artifact_object_key(session_id: str, artifact_id: str, filename: str) -> str:
-    """Canonical S3 object key scheme (research/04 §7.2)."""
+    """Canonical S3 object key scheme."""
     return f"sessions/{session_id}/artifacts/{artifact_id}/{filename}"
