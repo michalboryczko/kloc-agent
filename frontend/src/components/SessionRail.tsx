@@ -51,7 +51,7 @@ export function SessionRail({ sessionId }: SessionRailProps) {
 
   return (
     <aside
-      className="hidden md:flex md:flex-col gap-8 border-r border-[var(--line)] bg-[var(--bg-1)]/40 px-5 py-6 overflow-y-auto"
+      className="hidden min-[880px]:flex min-[880px]:flex-col gap-8 border-r border-[var(--line)] bg-[var(--bg-1)]/40 px-5 py-6 overflow-y-auto"
       aria-label="Session details"
     >
       <SessionCard sessionId={sessionId} />

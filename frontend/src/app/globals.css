@@ -130,8 +130,22 @@ body > * {
   z-index: 1;
 }
 
-main {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
+/*
+  CopilotChat inline layout. The chat is no longer a floating sidebar — it
+  fills the right column of the chat-view grid in page.tsx. CopilotKit's
+  default chat container has no explicit height, so we let flex flow take it.
+*/
+.kloc-copilot-chat,
+.kloc-copilot-chat > div,
+.kloc-copilot-chat .copilotKitChat,
+.kloc-copilot-chat .copilotKitWindow {
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-1);
+}
+
+.kloc-copilot-chat .copilotKitMessages,
+.kloc-copilot-chat .copilotKitChat {
+  flex: 1 1 auto;
+  min-height: 0;
 }

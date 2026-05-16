@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { CopilotKit } from "@copilotkit/react-core";
-import { CopilotSidebar } from "@copilotkit/react-ui";
+import { CopilotChat } from "@copilotkit/react-ui";
 import {
   createSession,
   listMessages,
@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { AgentBody } from "@/components/AgentBody";
 import { SessionPicker } from "@/components/SessionPicker";
+import { SessionRail } from "@/components/SessionRail";
 import { Button } from "@/components/ui/button";
 
 const AGENT_NAME =
@@ -82,8 +83,8 @@ export default function HomePage() {
   }
 
   return (
-    <main>
-      <header className="sticky top-0 z-10 flex h-12 items-center gap-4 border-b border-[var(--line-strong)] bg-[var(--bg-1)]/70 px-6 backdrop-blur">
+    <main className="grid grid-rows-[48px_1fr] h-screen">
+      <header className="sticky top-0 z-10 col-span-full flex h-12 items-center gap-4 border-b border-[var(--line-strong)] bg-[var(--bg-1)]/70 px-6 backdrop-blur">
         <Button
           variant="ghost"
           size="sm"
@@ -99,9 +100,9 @@ export default function HomePage() {
             BETA
           </span>
         </h1>
-        <span className="ml-auto font-mono text-[12px] text-[var(--text-mute)]">
+        <h2 className="ml-auto font-mono text-[12px] text-[var(--text-mute)]">
           session {picked.sessionId.slice(0, 8)}…
-        </span>
+        </h2>
       </header>
 
       <CopilotKit
@@ -112,15 +113,20 @@ export default function HomePage() {
         threadId={picked.sessionId}
         properties={{ session_id: picked.sessionId }}
       >
-        <AgentBody initialMessages={picked.initialMessages} />
-        <CopilotSidebar
-          defaultOpen={true}
-          clickOutsideToClose={false}
-          labels={{
-            title: "kloc analyst",
-            initial: "Ask anything about the indexed PHP codebase.",
-          }}
-        />
+        <AgentBody />
+        <div className="grid grid-cols-1 min-[880px]:grid-cols-[280px_1fr] min-h-0 overflow-hidden">
+          <SessionRail sessionId={picked.sessionId} />
+          <div className="chat-pane min-h-0 flex flex-col">
+            <CopilotChat
+              className="kloc-copilot-chat flex-1 min-h-0"
+              labels={{
+                title: "kloc analyst",
+                initial: "Ask anything about the indexed PHP codebase.",
+              }}
+              instructions="You are kloc, an analyst assistant over a PHP codebase indexed by kloc-intelligence. Use the available MCP tools to answer questions about the code."
+            />
+          </div>
+        </div>
       </CopilotKit>
     </main>
   );
