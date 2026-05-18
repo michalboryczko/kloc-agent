@@ -18,6 +18,8 @@
   --color-danger-bg: #fef2f2;
   --color-danger-line: #fecaca;
   --color-danger-ink: #991b1b;
+  --color-chip-bg: #0c0a09;
+  --color-chip-fg: #ffffff;
 }
 
 [data-theme="dark"] {
@@ -35,6 +37,8 @@
   --color-danger-bg: #3f1d1d;
   --color-danger-line: #7f1d1d;
   --color-danger-ink: #fca5a5;
+  --color-chip-bg: #0c0a09;
+  --color-chip-fg: #ffffff;
 }
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));

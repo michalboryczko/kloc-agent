@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { createSession } from "@/lib/api";
+import { ErrorBanner } from "./ErrorBanner";
 
 export function NewSessionButton() {
   const router = useRouter();
@@ -45,15 +46,7 @@ export function NewSessionButton() {
         </svg>
         {pending ? "Creating…" : "New session"}
       </button>
-      {error && (
-        <p
-          data-test="error-banner"
-          role="alert"
-          className="mono text-[10.5px] text-[--color-danger-ink] px-1"
-        >
-          {error}
-        </p>
-      )}
+      {error && <ErrorBanner message={error} />}
     </div>
   );
 }

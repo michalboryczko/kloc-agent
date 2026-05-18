@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 import {
   applyTheme,
   persistTheme,
+  readStoredTheme,
   resolveTheme,
   type Theme,
 } from "@/lib/theme";
@@ -13,7 +14,18 @@ const THEME_EVENT = "kloc-theme-change";
 function subscribe(cb: () => void) {
   if (typeof window === "undefined") return () => {};
   window.addEventListener(THEME_EVENT, cb);
-  return () => window.removeEventListener(THEME_EVENT, cb);
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  const onSystem = () => {
+    if (readStoredTheme() === null) {
+      applyTheme(media.matches ? "dark" : "light");
+      cb();
+    }
+  };
+  media.addEventListener("change", onSystem);
+  return () => {
+    window.removeEventListener(THEME_EVENT, cb);
+    media.removeEventListener("change", onSystem);
+  };
 }
 
 function getSnapshot(): Theme {

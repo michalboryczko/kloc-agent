@@ -48,7 +48,7 @@ export function ConversationClient({
               type="button"
               disabled={closed}
               aria-label="Send"
-              className="w-7 h-7 grid place-items-center rounded-md bg-[--color-ink] text-white hover:bg-[--color-ink]/90 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+              className="w-7 h-7 grid place-items-center rounded-md bg-[--color-chip-bg] text-[--color-chip-fg] hover:opacity-90 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <svg
                 width={13}

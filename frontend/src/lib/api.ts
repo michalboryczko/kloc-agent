@@ -5,8 +5,19 @@ import type {
   SessionList,
 } from "./types";
 
+const SERVER_BACKEND_URL =
+  process.env.BACKEND_URL ??
+  process.env.NEXT_PUBLIC_BACKEND_URL ??
+  "http://localhost:8000";
+
 export const BROWSER_BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
+
+function backendUrl(): string {
+  return typeof window === "undefined"
+    ? SERVER_BACKEND_URL
+    : BROWSER_BACKEND_URL;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -47,7 +58,7 @@ export async function listSessions(opts?: {
   const params = new URLSearchParams();
   if (opts?.includeClosed) params.set("include_closed", "true");
   const qs = params.toString();
-  const url = `${BROWSER_BACKEND_URL}/v1/sessions${qs ? `?${qs}` : ""}`;
+  const url = `${backendUrl()}/v1/sessions${qs ? `?${qs}` : ""}`;
   const res = await fetch(url, {
     method: "GET",
     headers: { Accept: "application/json" },
@@ -59,7 +70,7 @@ export async function listSessions(opts?: {
 export async function createSession(body?: {
   title?: string;
 }): Promise<CreateSessionResponse> {
-  const res = await fetch(`${BROWSER_BACKEND_URL}/v1/sessions`, {
+  const res = await fetch(`${backendUrl()}/v1/sessions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -74,7 +85,7 @@ export async function getSession(
   id: string,
   opts?: { signal?: AbortSignal },
 ): Promise<SessionDetail> {
-  const res = await fetch(`${BROWSER_BACKEND_URL}/v1/sessions/${id}`, {
+  const res = await fetch(`${backendUrl()}/v1/sessions/${id}`, {
     method: "GET",
     headers: { Accept: "application/json" },
     signal: opts?.signal,
@@ -90,7 +101,7 @@ export async function listMessages(
   if (params?.after !== undefined) qs.set("after", String(params.after));
   qs.set("limit", String(params?.limit ?? 500));
   const res = await fetch(
-    `${BROWSER_BACKEND_URL}/v1/sessions/${id}/messages?${qs.toString()}`,
+    `${backendUrl()}/v1/sessions/${id}/messages?${qs.toString()}`,
     {
       method: "GET",
       headers: { Accept: "application/json" },
@@ -101,7 +112,7 @@ export async function listMessages(
 }
 
 export async function closeSession(id: string): Promise<void> {
-  const res = await fetch(`${BROWSER_BACKEND_URL}/v1/sessions/${id}/close`, {
+  const res = await fetch(`${backendUrl()}/v1/sessions/${id}/close`, {
     method: "POST",
     headers: { Accept: "application/json" },
   });
@@ -119,7 +130,7 @@ export async function cancelRun(
   runId: string,
 ): Promise<void> {
   const res = await fetch(
-    `${BROWSER_BACKEND_URL}/v1/sessions/${sessionId}/runs/${runId}/cancel`,
+    `${backendUrl()}/v1/sessions/${sessionId}/runs/${runId}/cancel`,
     {
       method: "POST",
       headers: { Accept: "application/json" },

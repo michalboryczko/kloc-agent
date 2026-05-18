@@ -12,7 +12,7 @@ export default function LandingPage() {
         </header>
         <div className="flex-1 grid place-items-center px-6">
           <div className="text-center max-w-[420px]">
-            <div className="w-10 h-10 mx-auto rounded-[8px] bg-[--color-ink] grid place-items-center mb-4">
+            <div className="w-10 h-10 mx-auto rounded-[8px] bg-[--color-chip-bg] grid place-items-center mb-4">
               <svg
                 width={18}
                 height={18}
@@ -22,7 +22,7 @@ export default function LandingPage() {
                 strokeWidth={1.8}
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                className="text-white"
+                className="text-[--color-chip-fg]"
                 aria-hidden
               >
                 <path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2Z" />

@@ -54,7 +54,7 @@ export function Sidebar({ activeId }: { activeId?: string }) {
     >
       <div className="p-3 border-b border-[--color-line] space-y-3">
         <div className="flex items-center gap-2 px-1">
-          <div className="w-6 h-6 rounded-[6px] bg-[--color-ink] grid place-items-center">
+          <div className="w-6 h-6 rounded-[6px] bg-[--color-chip-bg] grid place-items-center">
             <svg
               width={13}
               height={13}
@@ -64,7 +64,7 @@ export function Sidebar({ activeId }: { activeId?: string }) {
               strokeWidth={1.8}
               strokeLinecap="round"
               strokeLinejoin="round"
-              className="text-white"
+              className="text-[--color-chip-fg]"
               aria-hidden
             >
               <path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2Z" />
