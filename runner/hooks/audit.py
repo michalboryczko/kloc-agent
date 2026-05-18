@@ -61,6 +61,8 @@ class AuditHookSender:
         self._after_worker: asyncio.Task | None = None
         self._http: httpx.AsyncClient | None = None
         self._dropped_once = False
+        self._denied_emitted: set[str] = set()
+        self._artifact_emitted: set[str] = set()
 
     async def start(self) -> None:
         if self._http is None:
@@ -159,12 +161,16 @@ class AuditHookSender:
     ) -> None:
         if not tool_call_id:
             return
+        key = str(tool_call_id)
+        if key in self._denied_emitted:
+            return
+        self._denied_emitted.add(key)
         await self._emit_custom_event(
             {
                 "type": "CUSTOM",
                 "name": "ToolCallDenied",
                 "value": {
-                    "toolCallId": str(tool_call_id),
+                    "toolCallId": key,
                     "toolName": tool_name,
                     "reason": reason,
                 },
@@ -211,8 +217,12 @@ class AuditHookSender:
         artifact_id = response.get("artifact_id")
         if not artifact_id:
             return response
+        key = str(artifact_id)
+        if key in self._artifact_emitted:
+            return response
+        self._artifact_emitted.add(key)
         value: dict[str, Any] = {
-            "artifactId": str(artifact_id),
+            "artifactId": key,
             "filename": filename,
             "sizeBytes": size_bytes,
         }

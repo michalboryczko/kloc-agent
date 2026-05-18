@@ -166,6 +166,28 @@ async def test_denial_without_tool_call_id_emits_no_event() -> None:
     assert not any(e.get("name") == "ToolCallDenied" for e in emitted)
 
 
+async def test_double_denial_for_same_tool_call_id_emits_once() -> None:
+    """Contract is exactly-once per toolCallId. A retry of before_tool_call
+    on the same tool use must not produce a second CUSTOM frame."""
+    emitted: list[dict] = []
+    sender = _make_sender(
+        emitted,
+        post_responses=[
+            {"decision": "deny", "reason": "deny_list"},
+            {"decision": "deny", "reason": "deny_list"},
+        ],
+    )
+    event_a = _ToolEvent(tool_call_id="tc-77", tool_name="read_file")
+    event_b = _ToolEvent(tool_call_id="tc-77", tool_name="read_file")
+
+    await sender.before_tool_call(event_a)
+    await sender.before_tool_call(event_b)
+
+    denied = [e for e in emitted if e.get("name") == "ToolCallDenied"]
+    assert len(denied) == 1
+    assert denied[0]["value"]["toolCallId"] == "tc-77"
+
+
 async def test_register_artifact_emits_artifact_attached_on_success() -> None:
     emitted: list[dict] = []
     sender = _make_sender(
@@ -294,3 +316,38 @@ async def test_register_artifact_does_not_emit_when_response_lacks_id() -> None:
 
     assert response == {"created": False}
     assert not any(e.get("name") == "ArtifactAttached" for e in emitted)
+
+
+async def test_double_register_for_same_artifact_id_emits_once() -> None:
+    """A re-register of the same artifact (idempotent webhook returns
+    `created=false` with the same artifact_id) must not produce a
+    second CUSTOM frame on the same run."""
+    emitted: list[dict] = []
+    sender = _make_sender(
+        emitted,
+        post_responses=[
+            {"artifact_id": "a-9", "created": True},
+            {"artifact_id": "a-9", "created": False},
+        ],
+    )
+
+    await sender.register_artifact(
+        filename="report.md",
+        content_type="text/markdown",
+        size_bytes=42,
+        bucket="b",
+        object_key="k",
+        sha256_hex="0" * 64,
+    )
+    await sender.register_artifact(
+        filename="report.md",
+        content_type="text/markdown",
+        size_bytes=42,
+        bucket="b",
+        object_key="k",
+        sha256_hex="0" * 64,
+    )
+
+    attached = [e for e in emitted if e.get("name") == "ArtifactAttached"]
+    assert len(attached) == 1
+    assert attached[0]["value"]["artifactId"] == "a-9"
