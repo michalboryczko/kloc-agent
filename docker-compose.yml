@@ -98,7 +98,7 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_USE_SSL: "false"
       ARTIFACT_BUCKET: ${ARTIFACT_BUCKET:-kloc-agent-artifacts-dev}
-      RUNNER_WARM_IDLE_S: ${RUNNER_WARM_IDLE_S:-60}
+      RUNNER_WARM_IDLE_S: ${RUNNER_WARM_IDLE_S:-300}
       RUNNER_HEARTBEAT_TIMEOUT_S: ${RUNNER_HEARTBEAT_TIMEOUT_S:-30}
       RUNNER_IMAGE_TAG: ${RUNNER_IMAGE_TAG:-kloc-agent-runner:dev}
       # Operator pivot: Gemini is the default provider. `LLM_PROVIDER` is
