@@ -16,6 +16,7 @@ export function SessionListItem({
     <Link
       href={`/s/${session.id}`}
       data-test="session-item"
+      data-active={active ? "true" : undefined}
       aria-current={active ? "page" : undefined}
       className={cn(
         "w-full text-left px-2.5 py-2 rounded-md transition-colors block",
@@ -48,8 +49,10 @@ export function SessionListItem({
           {session.id.slice(0, 7)}
         </span>
         <span aria-hidden>·</span>
-        <span>{session.message_count} msgs</span>
-        <span className="ml-auto mono">{formatRelative(session.updated_at)}</span>
+        <span data-test="session-count">{session.message_count} msgs</span>
+        <span data-test="session-when" className="ml-auto mono">
+          {formatRelative(session.updated_at)}
+        </span>
       </div>
     </Link>
   );

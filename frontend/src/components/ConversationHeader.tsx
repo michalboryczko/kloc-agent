@@ -45,7 +45,7 @@ export function ConversationHeader({
             {title}
           </h1>
           <p className="mono text-[11px] text-[--color-ink-muted] mt-0.5">
-            <span>{sessionId}</span>
+            <span data-test="thread-id">{sessionId}</span>
             <span aria-hidden> · </span>
             <span>{messageCount} messages</span>
             {closed && (
