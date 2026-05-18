@@ -29,7 +29,7 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
   return (
     <div
       data-test="tool-call"
-      data-tool-state={call.state}
+      data-state={call.state}
       data-tool-id={call.id}
       className={`border rounded-md px-2.5 py-1.5 mb-1.5 ${style.wrap}`}
     >

@@ -19,6 +19,7 @@ export function AssistantBubble({
       data-test="message"
       data-role="assistant"
       data-message-id={message.id}
+      data-seq={message.seq ?? undefined}
       className="flex gap-3 mb-7"
     >
       <div className="w-7 h-7 rounded-md bg-[--color-chip-bg] grid place-items-center shrink-0">

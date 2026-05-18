@@ -33,12 +33,15 @@ export function ArtifactChip({ artifact }: { artifact: ArtifactView }) {
         <path d="M14 2v6h6" />
       </svg>
       <span
-        data-test="artifact-filename"
+        data-test="artifact-name"
         className="mono text-[12px]"
       >
         {artifact.filename}
       </span>
-      <span className="mono text-[10.5px] text-[--color-ink-muted]">
+      <span
+        data-test="artifact-size"
+        className="mono text-[10.5px] text-[--color-ink-muted]"
+      >
         {formatSize(artifact.size_bytes)}
       </span>
       <svg
