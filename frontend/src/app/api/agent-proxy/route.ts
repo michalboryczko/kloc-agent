@@ -9,13 +9,13 @@ export async function POST(req: NextRequest) {
   const body = await req.text();
   let sessionId: string | undefined;
   try {
-    const parsed = JSON.parse(body) as { sessionId?: string };
-    sessionId = parsed?.sessionId;
+    const parsed = JSON.parse(body) as { thread_id?: string };
+    sessionId = parsed?.thread_id;
   } catch {
     return new Response("Invalid JSON body", { status: 400 });
   }
   if (!sessionId) {
-    return new Response("Missing sessionId", { status: 400 });
+    return new Response("Missing thread_id", { status: 400 });
   }
   const upstream = await fetch(
     `${BACKEND_URL}/v1/sessions/${sessionId}/stream`,

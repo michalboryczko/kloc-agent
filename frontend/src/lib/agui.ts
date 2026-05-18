@@ -24,7 +24,7 @@ export class StreamRequestError extends Error {
 export interface RunStartArgs {
   sessionId: string;
   runId: string;
-  messages: { role: string; content: string }[];
+  messages: { id?: string; role: string; content: string }[];
   signal?: AbortSignal;
 }
 
@@ -38,6 +38,11 @@ export interface RunResumeArgs {
 export async function* openRunStream(
   args: RunStartArgs,
 ): AsyncGenerator<AGUIEvent> {
+  const messages = args.messages.map((m) => ({
+    id: m.id ?? newMessageId(),
+    role: m.role,
+    content: m.content,
+  }));
   const res = await fetch("/api/agent-proxy", {
     method: "POST",
     headers: {
@@ -45,10 +50,9 @@ export async function* openRunStream(
       Accept: "text/event-stream",
     },
     body: JSON.stringify({
-      sessionId: args.sessionId,
-      runId: args.runId,
+      thread_id: args.sessionId,
       run_id: args.runId,
-      messages: args.messages,
+      messages,
     }),
     cache: "no-store",
     signal: args.signal,
@@ -125,6 +129,13 @@ async function* parseSSEBody(
       // completion and a thrown error here would mask the original cause.
     }
   }
+}
+
+function newMessageId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `msg-${Math.random().toString(36).slice(2)}-${Date.now()}`;
 }
 
 function decodeBlock(block: string): AGUIEvent | null {

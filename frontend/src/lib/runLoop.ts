@@ -222,7 +222,9 @@ export function useRunLoop(opts: UseRunLoopOptions): UseRunLoopReturn {
             openRunStream({
               sessionId: state.detail!.id,
               runId,
-              messages: [{ role: "user", content: trimmed }],
+              messages: [
+                { id: optimistic.id, role: "user", content: trimmed },
+              ],
               signal: ctrl.signal,
             }),
             "live",
