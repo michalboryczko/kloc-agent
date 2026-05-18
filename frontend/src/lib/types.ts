@@ -73,6 +73,7 @@ export type AGUIEventType =
 export interface BaseEvent<T extends AGUIEventType> {
   type: T;
   timestamp?: number;
+  seq?: number;
 }
 
 export interface RunStartedEvent extends BaseEvent<"RUN_STARTED"> {
@@ -144,13 +145,14 @@ export interface ArtifactAttachedCustom extends BaseEvent<"CUSTOM"> {
     artifactId: string;
     filename: string;
     sizeBytes: number;
-    mimeType: string;
+    mimeType?: string;
+    parentMessageId?: string;
   };
 }
 
 export interface HookBackpressureCustom extends BaseEvent<"CUSTOM"> {
   name: "HookBackpressure";
-  value: { event: string; tool?: string; reason: string };
+  value: Record<string, unknown>;
 }
 
 export interface UnknownCustomEvent extends BaseEvent<"CUSTOM"> {
