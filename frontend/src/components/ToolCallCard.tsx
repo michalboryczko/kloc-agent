@@ -65,12 +65,20 @@ export function ToolCallCard({ call }: { call: ToolCallView }) {
           {summariseArgs(call.args)}
         </span>
         {isDenied ? (
-          <span
-            data-test="denied-label"
-            className="ml-auto shrink-0 mono text-[10px] font-medium tracking-[0.06em] text-[--color-danger-ink] border border-[--color-danger-line] rounded px-1.5 py-0.5"
-          >
-            DENIED
-          </span>
+          <>
+            <span
+              data-test="tool-meta"
+              className="ml-auto shrink-0 mono text-[11px] text-[--color-danger-ink]/80 truncate"
+            >
+              {call.result ?? call.meta ?? ""}
+            </span>
+            <span
+              data-test="denied-label"
+              className="shrink-0 mono text-[10px] font-medium tracking-[0.06em] text-[--color-danger-ink] border border-[--color-danger-line] rounded px-1.5 py-0.5"
+            >
+              DENIED
+            </span>
+          </>
         ) : (
           <span
             data-test="tool-meta"

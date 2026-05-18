@@ -2,6 +2,8 @@
 
 import { useCallback, useState, type KeyboardEvent } from "react";
 
+type InputKey = KeyboardEvent<HTMLInputElement>;
+
 export function InputBar({
   disabled,
   closed,
@@ -21,8 +23,8 @@ export function InputBar({
   }, [text, disabled, closed, onSubmit]);
 
   const handleKey = useCallback(
-    (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
+    (e: InputKey) => {
+      if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         send();
       }
@@ -34,7 +36,8 @@ export function InputBar({
     <div className="border-t border-[--color-line] px-5 py-3 shrink-0">
       <div className="max-w-[680px] mx-auto">
         <div className="flex items-center gap-2 border border-[--color-line-strong] rounded-lg bg-[--color-canvas] px-3 py-2 focus-within:ring-2 focus-within:ring-[--color-accent]/15 focus-within:border-[--color-accent]/40 transition">
-          <textarea
+          <input
+            type="text"
             data-test="message-input"
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -45,8 +48,7 @@ export function InputBar({
                 : "Ask about the codebase…"
             }
             disabled={closed}
-            rows={1}
-            className="flex-1 outline-none text-[13.5px] bg-transparent placeholder:text-[--color-ink-faint] disabled:cursor-not-allowed resize-none max-h-32"
+            className="flex-1 outline-none text-[13.5px] bg-transparent placeholder:text-[--color-ink-faint] disabled:cursor-not-allowed"
           />
           <kbd className="mono text-[10px] text-[--color-ink-faint] border border-[--color-line] rounded px-1.5 py-0.5">
             ⌘ ↵
