@@ -1,9 +1,7 @@
-import coreWebVitals from "eslint-config-next/core-web-vitals";
-import typescript from "eslint-config-next/typescript";
+import next from "eslint-config-next";
 
 const eslintConfig = [
-  ...coreWebVitals,
-  ...typescript,
+  ...next,
   {
     ignores: [".next/**", "node_modules/**"],
   },

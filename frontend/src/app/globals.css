@@ -1,212 +1,97 @@
 @import "tailwindcss";
 
-/*
-  Editorial Terminal token theme — dark only.
-  Tokens are sourced verbatim from docs/reviews/ui-design-review/design-direction.md.
-  The @theme block exposes them to Tailwind v4 (bg-bg-0, text-accent, font-serif, ...).
-  The :root block makes them available as raw CSS variables for inline gradient
-  expressions, the CopilotKit override layer, and any non-Tailwind consumers.
-*/
-
 @theme {
-  /* Colour */
-  --color-bg-0: #09090b;
-  --color-bg-1: #0d0d10;
-  --color-bg-2: #131318;
-  --color-bg-elev: #1a1a20;
-  --color-bg-hover: #1f1f26;
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, "SF Mono", Menlo, monospace;
 
-  --color-line: rgba(255, 255, 255, 0.06);
-  --color-line-strong: rgba(255, 255, 255, 0.12);
-  --color-line-bright: rgba(255, 255, 255, 0.22);
-
-  --color-text: #ededf0;
-  --color-text-mute: #9b9ba4;
-  --color-text-dim: #5d5d66;
-
-  --color-accent: #f5a524;
-  --color-accent-bright: #ffba3d;
-  --color-accent-soft: rgba(245, 165, 36, 0.10);
-  --color-accent-line: rgba(245, 165, 36, 0.35);
-
-  --color-danger: #f87171;
-  --color-danger-soft: rgba(248, 113, 113, 0.10);
-  --color-success: #4ade80;
-
-  /* Typography — these read CSS vars set by next/font in layout.tsx */
-  --font-serif: var(--serif), "Instrument Serif", Georgia, serif;
-  --font-sans: var(--sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: var(--mono), "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-
-  /* Radius */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 10px;
-
-  /* Motion */
-  --ease-out-snappy: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --color-ink: #0c0a09;
+  --color-ink-muted: #57534d;
+  --color-ink-faint: #a8a29e;
+  --color-line: #e7e5e3;
+  --color-line-strong: #d6d3d0;
+  --color-canvas: #ffffff;
+  --color-canvas-rail: #faf9f7;
+  --color-canvas-sunk: #f5f4f1;
+  --color-accent: #2b5cff;
+  --color-success: #15803d;
+  --color-warning: #b45309;
+  --color-danger-bg: #fef2f2;
+  --color-danger-line: #fecaca;
+  --color-danger-ink: #991b1b;
 }
 
-:root {
-  --bg-0: #09090b;
-  --bg-1: #0d0d10;
-  --bg-2: #131318;
-  --bg-elev: #1a1a20;
-  --bg-hover: #1f1f26;
-
-  --line: rgba(255, 255, 255, 0.06);
-  --line-strong: rgba(255, 255, 255, 0.12);
-  --line-bright: rgba(255, 255, 255, 0.22);
-
-  --text: #ededf0;
-  --text-mute: #9b9ba4;
-  --text-dim: #5d5d66;
-
-  --accent: #f5a524;
-  --accent-bright: #ffba3d;
-  --accent-soft: rgba(245, 165, 36, 0.10);
-  --accent-line: rgba(245, 165, 36, 0.35);
-
-  --danger: #f87171;
-  --danger-soft: rgba(248, 113, 113, 0.10);
-  --success: #4ade80;
-
-  color-scheme: dark;
+[data-theme="dark"] {
+  --color-ink: #f5f5f4;
+  --color-ink-muted: #a8a29e;
+  --color-ink-faint: #78716c;
+  --color-line: #27272a;
+  --color-line-strong: #3f3f46;
+  --color-canvas: #1c1917;
+  --color-canvas-rail: #18181b;
+  --color-canvas-sunk: #27272a;
+  --color-accent: #7c92ff;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-danger-bg: #3f1d1d;
+  --color-danger-line: #7f1d1d;
+  --color-danger-ink: #fca5a5;
 }
 
-/* CopilotKit panel inherits the new theme. Vars defined by @copilotkit/react-ui. */
-:root {
-  --copilot-kit-primary-color: var(--accent);
-  --copilot-kit-contrast-color: var(--text);
-  --copilot-kit-background-color: var(--bg-1);
-  --copilot-kit-secondary-color: var(--bg-2);
-  --copilot-kit-secondary-contrast-color: var(--text);
-  --copilot-kit-separator-color: var(--line-strong);
-  --copilot-kit-muted-color: var(--text-mute);
-}
-
-* {
-  box-sizing: border-box;
-}
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 html,
 body {
-  height: 100%;
-  padding: 0;
-  margin: 0;
-}
-
-body {
-  color: var(--text);
-  background-color: var(--bg-0);
-  background-image:
-    radial-gradient(at 100% 0%, rgba(245, 165, 36, 0.07) 0%, transparent 45%),
-    radial-gradient(at 0% 100%, rgba(245, 165, 36, 0.045) 0%, transparent 50%);
-  background-attachment: fixed;
+  background-color: var(--color-canvas-sunk);
+  color: var(--color-ink);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
 }
 
-/*
-  Film-grain overlay. Inline SVG turbulence keeps it asset-free; opacity 0.035
-  is the smallest value that still reads as texture against the dark base.
-*/
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.5 0'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
-  background-size: 160px 160px;
+.mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "ss01", "ss02";
 }
 
-/* Push everything above the grain layer */
-body > * {
-  position: relative;
-  z-index: 1;
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
-/*
-  CopilotChat inline layout. The chat is no longer a floating sidebar — it
-  fills the right column of the chat-view grid in page.tsx. CopilotKit's
-  default chat container has no explicit height, so we let flex flow take it.
-*/
-.kloc-copilot-chat,
-.kloc-copilot-chat > div,
-.kloc-copilot-chat .copilotKitChat,
-.kloc-copilot-chat .copilotKitWindow {
-  height: 100%;
-  min-height: 0;
-  background: var(--bg-1);
+.spin {
+  animation: spin 1s linear infinite;
+  transform-origin: center;
+  display: inline-block;
+}
+.blink {
+  animation: blink 1s steps(2) infinite;
+  display: inline-block;
+}
+.pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
 }
 
-.kloc-copilot-chat .copilotKitMessages,
-.kloc-copilot-chat .copilotKitChat {
-  flex: 1 1 auto;
-  min-height: 0;
+.scroll::-webkit-scrollbar {
+  width: 8px;
 }
-
-@layer utilities {
-  /*
-    Entrance fade-up — 220ms with optional 20/40/60ms staggers. Used by the
-    picker on first paint. Suppressed under prefers-reduced-motion via the
-    Tailwind `motion-reduce:` prefix at the callsite (preferred over a global
-    @media rule so future callers can opt out per-element).
-  */
-  @keyframes kloc-fade-up {
-    from {
-      opacity: 0;
-      transform: translateY(8px);
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
-  }
-
-  .animate-kloc-fade-up {
-    animation: kloc-fade-up 220ms var(--ease-out-snappy) both;
-  }
-
-  .animate-kloc-fade-up-delay-1 {
-    animation: kloc-fade-up 220ms var(--ease-out-snappy) 20ms both;
-  }
-
-  .animate-kloc-fade-up-delay-2 {
-    animation: kloc-fade-up 220ms var(--ease-out-snappy) 40ms both;
-  }
-
-  .animate-kloc-fade-up-delay-3 {
-    animation: kloc-fade-up 220ms var(--ease-out-snappy) 60ms both;
-  }
-
-  /*
-    Streaming indicator — three dots whose opacity cycles. Each dot lags its
-    predecessor by 150ms via `animation-delay`. Total cycle 1200ms so the
-    "wave" reads as a slow conversation pulse, not a frantic loader.
-  */
-  @keyframes kloc-pulse-dot {
-    0%, 80%, 100% {
-      opacity: 0.3;
-    }
-    40% {
-      opacity: 1;
-    }
-  }
-
-  .animate-kloc-pulse-dot {
-    animation: kloc-pulse-dot 1200ms ease-in-out infinite both;
-  }
-
-  .kloc-pulse-dot-2 {
-    animation-delay: 150ms;
-  }
-
-  .kloc-pulse-dot-3 {
-    animation-delay: 300ms;
-  }
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 4px;
+}
+.scroll::-webkit-scrollbar-track {
+  background: transparent;
 }

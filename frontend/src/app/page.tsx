@@ -1,151 +1,43 @@
-"use client";
+import { Shell } from "@/components/Shell";
+import { Sidebar } from "@/components/Sidebar";
+import { ThemeToggle } from "@/components/ThemeToggle";
 
-import { useEffect, useRef, useState } from "react";
-import dynamic from "next/dynamic";
-import {
-  ApiError,
-  NetworkError,
-  createSession,
-  listMessages,
-  listSessions,
-  type Message,
-  type SessionListItem,
-} from "@/lib/api";
-import { SessionPicker } from "@/components/SessionPicker";
-
-// CopilotKit (~1.5 MB) only loads on the chat view; the picker route ships
-// without it. ssr:false because CopilotKit hooks are client-only.
-const ChatShell = dynamic(
-  () => import("@/components/ChatShell").then((m) => m.ChatShell),
-  { ssr: false },
-);
-
-type PickedSession = {
-  sessionId: string;
-  initialMessages: Message[];
-};
-
-export type BusyState =
-  | { kind: "none" }
-  | { kind: "new" }
-  | { kind: "pick"; id: string };
-
-const BUSY_NONE: BusyState = { kind: "none" };
-const BUSY_NEW: BusyState = { kind: "new" };
-
-function isAbortError(e: unknown): boolean {
+export default function LandingPage() {
   return (
-    e instanceof DOMException && e.name === "AbortError"
-  ) || (e instanceof Error && e.name === "AbortError");
-}
-
-function formatError(e: unknown): string {
-  if (e instanceof ApiError) {
-    const preview = e.body.length > 120 ? `${e.body.slice(0, 120)}…` : e.body;
-    return `backend ${e.status}: ${preview || e.message}`;
-  }
-  if (e instanceof NetworkError) {
-    return "network unreachable — is the backend running?";
-  }
-  return e instanceof Error ? e.message : String(e);
-}
-
-export default function HomePage() {
-  const [picked, setPicked] = useState<PickedSession | null>(null);
-  const [sessions, setSessions] = useState<SessionListItem[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<BusyState>(BUSY_NONE);
-
-  // Tracks the in-flight user-pick fetch (listMessages / createSession) so a
-  // back-navigation or rapid retry cancels the previous request.
-  const pickCtrlRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    if (picked) return;
-    const ctrl = new AbortController();
-    listSessions({ signal: ctrl.signal })
-      .then((res) => {
-        setSessions(res.sessions);
-      })
-      .catch((e: unknown) => {
-        if (isAbortError(e)) return;
-        setError(formatError(e));
-      });
-    return () => ctrl.abort();
-  }, [picked]);
-
-  function abortPick() {
-    if (pickCtrlRef.current) {
-      pickCtrlRef.current.abort();
-      pickCtrlRef.current = null;
-    }
-  }
-
-  async function pickExisting(s: SessionListItem) {
-    setError(null);
-    abortPick();
-    const ctrl = new AbortController();
-    pickCtrlRef.current = ctrl;
-    setBusy({ kind: "pick", id: s.id });
-    try {
-      const page = await listMessages(s.id, { limit: 500, signal: ctrl.signal });
-      if (ctrl.signal.aborted) return;
-      setPicked({ sessionId: s.id, initialMessages: page.messages });
-    } catch (e) {
-      if (isAbortError(e)) return;
-      setError(formatError(e));
-    } finally {
-      if (pickCtrlRef.current === ctrl) {
-        pickCtrlRef.current = null;
-        setBusy(BUSY_NONE);
-      }
-    }
-  }
-
-  async function startNew() {
-    setError(null);
-    abortPick();
-    const ctrl = new AbortController();
-    pickCtrlRef.current = ctrl;
-    setBusy(BUSY_NEW);
-    try {
-      const r = await createSession({ signal: ctrl.signal });
-      if (ctrl.signal.aborted) return;
-      setPicked({ sessionId: r.session_id, initialMessages: [] });
-    } catch (e) {
-      if (isAbortError(e)) return;
-      setError(formatError(e));
-    } finally {
-      if (pickCtrlRef.current === ctrl) {
-        pickCtrlRef.current = null;
-        setBusy(BUSY_NONE);
-      }
-    }
-  }
-
-  function onBack() {
-    setError(null);
-    abortPick();
-    setPicked(null);
-  }
-
-  if (!picked) {
-    return (
-      <SessionPicker
-        sessions={sessions}
-        error={error}
-        busy={busy}
-        onPick={pickExisting}
-        onNew={startNew}
-      />
-    );
-  }
-
-  return (
-    <ChatShell
-      sessionId={picked.sessionId}
-      initialMessages={picked.initialMessages}
-      onBack={onBack}
-    />
+    <Shell>
+      <Sidebar />
+      <main className="flex-1 min-w-0 flex flex-col bg-[--color-canvas]">
+        <header className="flex items-center justify-end px-5 py-3 border-b border-[--color-line] shrink-0">
+          <ThemeToggle />
+        </header>
+        <div className="flex-1 grid place-items-center px-6">
+          <div className="text-center max-w-[420px]">
+            <div className="w-10 h-10 mx-auto rounded-[8px] bg-[--color-ink] grid place-items-center mb-4">
+              <svg
+                width={18}
+                height={18}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.8}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="text-white"
+                aria-hidden
+              >
+                <path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2Z" />
+              </svg>
+            </div>
+            <h1 className="text-[18px] font-medium tracking-tight mb-2">
+              kloc analyst
+            </h1>
+            <p className="text-[13px] text-[--color-ink-muted] leading-relaxed">
+              Pick a session from the rail to resume, or start a new one to ask
+              about the indexed codebase.
+            </p>
+          </div>
+        </div>
+      </main>
+    </Shell>
   );
 }
