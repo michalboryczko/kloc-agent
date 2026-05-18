@@ -106,6 +106,9 @@ class AuditHookSender:
     async def before_tool_call(self, event: Any) -> None:
         """Block until the backend responds or the 2 s deadline lapses."""
         tool_name, tool_input = resolve_tool_call(event)
+        tool_call_id = event.tool_use.get("toolUseId") or event.tool_use.get(
+            "id"
+        )
         log.info(
             "audit hook fired: BeforeToolCall tool=%s session=%s run=%s",
             tool_name,
@@ -115,8 +118,7 @@ class AuditHookSender:
         payload = self._build_payload(
             event_name="BeforeToolCall",
             payload={
-                "tool_call_id": event.tool_use.get("toolUseId")
-                or event.tool_use.get("id"),
+                "tool_call_id": tool_call_id,
                 "tool_name": tool_name,
                 "args": tool_input,
             },
@@ -136,15 +138,96 @@ class AuditHookSender:
                     },
                 }
             )
+            await self._emit_tool_call_denied(
+                tool_call_id, tool_name, "policy_deadline_exceeded"
+            )
             return
         except Exception:
             log.exception("audit.before_post_failed")
-            # Fail-closed on unexpected errors so a misconfigured backend
-            # cannot let unaudited tool calls through silently.
             event.cancel_tool = "policy_unavailable"
+            await self._emit_tool_call_denied(
+                tool_call_id, tool_name, "policy_unavailable"
+            )
             return
         if response.get("decision") == "deny":
-            event.cancel_tool = response.get("reason", "policy_denied")
+            reason = response.get("reason", "policy_denied")
+            event.cancel_tool = reason
+            await self._emit_tool_call_denied(tool_call_id, tool_name, reason)
+
+    async def _emit_tool_call_denied(
+        self, tool_call_id: Any, tool_name: str, reason: str
+    ) -> None:
+        if not tool_call_id:
+            return
+        await self._emit_custom_event(
+            {
+                "type": "CUSTOM",
+                "name": "ToolCallDenied",
+                "value": {
+                    "toolCallId": str(tool_call_id),
+                    "toolName": tool_name,
+                    "reason": reason,
+                },
+            }
+        )
+
+    async def register_artifact(
+        self,
+        *,
+        filename: str,
+        content_type: str,
+        size_bytes: int,
+        bucket: str,
+        object_key: str,
+        sha256_hex: str,
+        message_id: str | None = None,
+        tool_call_id: str | None = None,
+    ) -> dict | None:
+        """POST an `ArtifactRegistered` webhook, then emit a CUSTOM
+        AG-UI event on the JSONL channel so the FE can render an
+        artifact chip without polling. Returns the webhook response
+        (containing `artifact_id`) on success; None on failure.
+        """
+        webhook_payload: dict[str, Any] = {
+            "filename": filename,
+            "content_type": content_type,
+            "size_bytes": size_bytes,
+            "bucket": bucket,
+            "object_key": object_key,
+            "sha256": sha256_hex,
+        }
+        if message_id:
+            webhook_payload["message_id"] = message_id
+        if tool_call_id:
+            webhook_payload["tool_call_id"] = tool_call_id
+        wrapped = self._build_payload(
+            event_name="ArtifactRegistered", payload=webhook_payload
+        )
+        try:
+            response = await self._post(wrapped, "ArtifactRegistered")
+        except Exception:
+            log.exception("audit.artifact_register_failed")
+            return None
+        artifact_id = response.get("artifact_id")
+        if not artifact_id:
+            return response
+        value: dict[str, Any] = {
+            "artifactId": str(artifact_id),
+            "filename": filename,
+            "sizeBytes": size_bytes,
+        }
+        if content_type:
+            value["mimeType"] = content_type
+        if message_id:
+            value["parentMessageId"] = message_id
+        await self._emit_custom_event(
+            {
+                "type": "CUSTOM",
+                "name": "ArtifactAttached",
+                "value": value,
+            }
+        )
+        return response
 
     async def after_tool_call(self, event: Any) -> None:
         """Fire-and-forget; drop heartbeats first when the queue

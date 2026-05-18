@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse, Response
 from starlette.requests import ClientDisconnect
 
 from src.settings import get_settings
+from src.streaming.execution_registry import execution_registry
 
 
 router = APIRouter(tags=["internal"])
@@ -50,6 +51,19 @@ def _diag(msg: str) -> None:
     if not _diag_enabled():
         return
     print(msg, file=sys.stderr, flush=True)
+
+
+async def _stamp_seq_and_publish(
+    bus: Any, session_id: str, run_id: str, frame: dict
+) -> None:
+    """Allocate a monotonic seq from the ExecutionRegistry ring, stamp
+    it onto the wire frame, then publish to the bus. Single source of
+    seq truth — SSE subscribers and the persister both see the same
+    number, and reconnect cursors stay consistent across replay."""
+    execution = await execution_registry.get_or_create(session_id, run_id)
+    seq = execution.append(frame)
+    frame["seq"] = seq
+    await bus.publish(session_id, run_id, frame)
 
 
 async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> None:
@@ -144,7 +158,7 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
             )
         return
 
-    await bus.publish(session_id, str(run_id), frame)
+    await _stamp_seq_and_publish(bus, session_id, str(run_id), frame)
     _diag(
         f"dispatched: type={frame_type} -> bus(sid={session_id}, "
         f"rid={run_id})"
@@ -157,7 +171,7 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
         pending = pending_by_session.pop(session_id, None)
         if pending:
             for buf in pending:
-                await bus.publish(session_id, str(run_id), buf)
+                await _stamp_seq_and_publish(bus, session_id, str(run_id), buf)
             _diag(
                 f"replay flush: session_id={session_id} "
                 f"count={len(pending)} run_id={run_id}"

@@ -64,21 +64,20 @@ async def stream_post(
             detail=f"invalid session_id {session_id!r} — must be a UUID",
         )
 
-    # Fail fast on registry unavailability BEFORE persisting the user
-    # message. Otherwise we end up with a half-committed transaction:
-    # message persisted, runner never spawned; the retry would replay
-    # the message via `prior_messages` and the user would see their own
-    # input duplicated. Persistence still happens BEFORE forwarding to
-    # the runner — just AFTER the registry health check.
     registry = _get_runner_registry(request)
 
-    # Persist + commit the user message BEFORE forwarding to the runner.
-    await _persist_user_message(session_uuid, messages)
+    # Build hydration BEFORE persisting the new user message so
+    # `prior_messages` snapshots the DB state *without* the new turn.
+    # The new turn arrives at the runner via `inbox.put` below, and the
+    # runner merges `prior_messages + inbound.messages`; including the
+    # new message in both lists doubles it in `RunAgentInput.messages`
+    # and the UI renders the user bubble twice.
     hydration_payload = await _build_hydration_payload(
         session_id=session_id,
         session_uuid=session_uuid,
         run_id=run_id,
     )
+    await _persist_user_message(session_uuid, messages)
     entry = await registry.get_or_spawn(session_id, hydration_payload)
     entry.warm_idle.on_user_message()
 
@@ -223,9 +222,10 @@ async def _persist_events(
     run_id: str,
     execution,
 ) -> None:
-    """Tap the event bus, push every event onto the execution ring, and
-    drive `TextDeltaDebouncer` so durable persistence happens alongside
-    SSE delivery.
+    """Tap the event bus and drive `TextDeltaDebouncer` so durable
+    persistence happens alongside SSE delivery. The ExecutionRegistry
+    ring is filled at the JSONL ingress boundary; this coroutine only
+    handles message-row persistence.
 
     Holds one AsyncSession for the coroutine's lifetime and commits per
     delta; opening a fresh session per delta saturated the asyncpg pool
@@ -305,7 +305,6 @@ async def _persist_events(
                 except StopAsyncIteration:
                     return
                 wire = normalize(event)
-                execution.append(wire)
                 kind = wire.get("type")
                 if kind == "TEXT_MESSAGE_CONTENT":
                     await debouncer.on_content(

@@ -20,7 +20,6 @@ import uuid
 
 import pytest
 
-from src.streaming.event_bus import event_bus
 from src.streaming.execution_registry import execution_registry
 from tests.conftest import FakeRunner
 
@@ -70,7 +69,11 @@ async def test_concurrent_post_stream_same_run_id(
 
     async def _publish_scripted_after(delay: float) -> None:
         """Schedule the scripted runner event sequence after both POSTs
-        have wired their SSE subscribers onto the bus."""
+        have wired their SSE subscribers onto the bus. Frames flow
+        through `_dispatch_frame` so the ExecutionRegistry ring is
+        populated at the same boundary the production JSONL ingress
+        uses — the SSE generator and the persister both see frames
+        already stamped with seq."""
         await asyncio.sleep(delay)
         scripted = [
             {"type": "RUN_STARTED", "runId": run_id},
@@ -81,14 +84,20 @@ async def test_concurrent_post_stream_same_run_id(
             },
             {"type": "RUN_FINISHED", "runId": run_id},
         ]
+
+        class _Req:
+            app = app_in_process
+
+        from src.api.internal import _dispatch_frame
+
         for evt in scripted:
-            await event_bus.publish(sid, run_id, evt)
+            await _dispatch_frame(_Req(), sid, evt)
 
     publisher = asyncio.create_task(_publish_scripted_after(delay=0.3))
 
     # Two concurrent POSTs. Each blocks on its SSE generator until
-    # RUN_FINISHED arrives via event_bus.publish, then returns 200 with
-    # the assembled SSE body.
+    # RUN_FINISHED is dispatched, then returns 200 with the assembled
+    # SSE body.
     try:
         responses = await asyncio.wait_for(
             asyncio.gather(

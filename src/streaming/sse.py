@@ -47,14 +47,18 @@ def make_response(
 
     async def stream() -> AsyncIterator[bytes]:
         async for event in generator:
-            # Bus delivers plain dicts; AG-UI's encoder requires a typed
-            # BaseEvent. Validate-or-skip — an unknown tag (`runner_ready`,
-            # `heartbeat`, future runner-internal frames that aren't part
-            # of the AG-UI public protocol) used to crash the whole
-            # StreamingResponse before a single byte was yielded. Now they
-            # are logged and dropped so well-formed AG-UI frames still get
-            # through to the client.
+            seq: int | None = None
             if isinstance(event, dict):
+                raw_seq = event.get("seq")
+                if isinstance(raw_seq, int):
+                    seq = raw_seq
+                # Bus delivers plain dicts; AG-UI's encoder requires a typed
+                # BaseEvent. Validate-or-skip — an unknown tag (`runner_ready`,
+                # `heartbeat`, future runner-internal frames that aren't part
+                # of the AG-UI public protocol) used to crash the whole
+                # StreamingResponse before a single byte was yielded. Now they
+                # are logged and dropped so well-formed AG-UI frames still get
+                # through to the client.
                 try:
                     event = _EVENT_ADAPTER.validate_python(event)
                 except ValidationError:
@@ -63,6 +67,13 @@ def make_response(
                         event.get("type") if isinstance(event, dict) else None,
                     )
                     continue
-            yield encoder.encode(event).encode("utf-8")
+            else:
+                raw_seq = getattr(event, "seq", None)
+                if isinstance(raw_seq, int):
+                    seq = raw_seq
+            encoded = encoder.encode(event)
+            if seq is not None:
+                encoded = f"id: {seq}\n" + encoded
+            yield encoded.encode("utf-8")
 
     return StreamingResponse(stream(), media_type=encoder.get_content_type())
