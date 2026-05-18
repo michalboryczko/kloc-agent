@@ -3,7 +3,7 @@ export function BlinkingCaret() {
     <span
       data-test="blinking-caret"
       aria-hidden
-      className="blink text-[--color-ink-muted] ml-0.5"
+      className="blink text-[var(--color-ink-muted)] ml-0.5"
     >
       ▍
     </span>

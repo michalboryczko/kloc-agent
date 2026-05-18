@@ -28,8 +28,8 @@ export default async function SessionPage({
     return (
       <Shell>
         <Sidebar activeId={sessionId} />
-        <main className="flex-1 min-w-0 flex flex-col bg-[--color-canvas]">
-          <header className="px-5 py-3 border-b border-[--color-line]" />
+        <main className="flex-1 min-w-0 flex flex-col bg-[var(--color-canvas)]">
+          <header className="px-5 py-3 border-b border-[var(--color-line)]" />
           <div className="flex-1 grid place-items-center p-6">
             <ErrorBanner
               message={
@@ -45,7 +45,7 @@ export default async function SessionPage({
   return (
     <Shell>
       <Sidebar activeId={sessionId} />
-      <main className="flex-1 min-w-0 flex flex-col bg-[--color-canvas]">
+      <main className="flex-1 min-w-0 flex flex-col bg-[var(--color-canvas)]">
         <ConversationHeader
           title={detail.title}
           sessionId={detail.id}

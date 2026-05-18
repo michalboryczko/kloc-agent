@@ -29,7 +29,7 @@ export function NewSessionButton() {
         data-test="new-session-btn"
         onClick={handleClick}
         disabled={pending}
-        className="w-full flex items-center justify-center gap-1.5 text-[13px] font-medium py-1.5 rounded-md border border-[--color-line-strong] bg-[--color-canvas] hover:bg-[--color-canvas-sunk] transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+        className="w-full flex items-center justify-center gap-1.5 text-[13px] font-medium py-1.5 rounded-md border border-[var(--color-line-strong)] bg-[var(--color-canvas)] hover:bg-[var(--color-canvas-sunk)] transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
       >
         <svg
           width={14}

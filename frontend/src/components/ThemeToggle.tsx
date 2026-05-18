@@ -56,7 +56,7 @@ export function ThemeToggle() {
       onClick={toggle}
       aria-label={label}
       title={label}
-      className="p-1.5 rounded hover:bg-[--color-canvas-sunk] text-[--color-ink-muted]"
+      className="p-1.5 rounded hover:bg-[var(--color-canvas-sunk)] text-[var(--color-ink-muted)]"
     >
       {isDark ? (
         <svg

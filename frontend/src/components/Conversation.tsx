@@ -9,9 +9,11 @@ import { Thread } from "./Thread";
 export function Conversation({
   initialDetail,
   initialHistory,
+  autoFocusInput = false,
 }: {
   initialDetail: SessionDetail;
   initialHistory: MessagesPage;
+  autoFocusInput?: boolean;
 }) {
   const { state, submit, retry } = useRunLoop({
     detail: initialDetail,
@@ -33,7 +35,12 @@ export function Conversation({
         errorMessage={state.errorMessage}
       />
       <Thread state={state} onRetry={retry} />
-      <InputBar disabled={inFlight} closed={closed} onSubmit={submit} />
+      <InputBar
+        disabled={inFlight}
+        closed={closed}
+        onSubmit={submit}
+        autoFocus={autoFocusInput}
+      />
     </>
   );
 }

@@ -50,11 +50,11 @@ export function Sidebar({ activeId }: { activeId?: string }) {
   return (
     <aside
       data-test="sidebar"
-      className="w-[260px] shrink-0 flex flex-col bg-[--color-canvas-rail] border-r border-[--color-line]"
+      className="w-[260px] shrink-0 flex flex-col bg-[var(--color-canvas-rail)] border-r border-[var(--color-line)]"
     >
-      <div className="p-3 border-b border-[--color-line] space-y-3">
+      <div className="p-3 border-b border-[var(--color-line)] space-y-3">
         <div className="flex items-center gap-2 px-1">
-          <div className="w-6 h-6 rounded-[6px] bg-[--color-chip-bg] grid place-items-center">
+          <div className="w-6 h-6 rounded-[6px] bg-[var(--color-chip-bg)] grid place-items-center">
             <svg
               width={13}
               height={13}
@@ -64,14 +64,14 @@ export function Sidebar({ activeId }: { activeId?: string }) {
               strokeWidth={1.8}
               strokeLinecap="round"
               strokeLinejoin="round"
-              className="text-[--color-chip-fg]"
+              className="text-[var(--color-chip-fg)]"
               aria-hidden
             >
               <path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2Z" />
             </svg>
           </div>
           <span className="text-[13px] font-medium tracking-tight">kloc</span>
-          <span className="mono text-[10px] text-[--color-ink-faint] ml-auto">
+          <span className="mono text-[10px] text-[var(--color-ink-faint)] ml-auto">
             v0.1
           </span>
         </div>
@@ -87,7 +87,7 @@ export function Sidebar({ activeId }: { activeId?: string }) {
             />
           </div>
         ) : sessions === null ? (
-          <p className="mono text-[10.5px] text-[--color-ink-faint] px-2 py-2">
+          <p className="mono text-[10.5px] text-[var(--color-ink-faint)] px-2 py-2">
             Loading…
           </p>
         ) : sessions.length === 0 ? (
@@ -97,7 +97,7 @@ export function Sidebar({ activeId }: { activeId?: string }) {
             <div key={group.name} className="mb-3">
               <p
                 data-test="group-header"
-                className="mono text-[9.5px] tracking-[0.12em] text-[--color-ink-faint] uppercase px-2 mb-1"
+                className="mono text-[9.5px] tracking-[0.12em] text-[var(--color-ink-faint)] uppercase px-2 mb-1"
               >
                 {group.name}
               </p>

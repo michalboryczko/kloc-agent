@@ -14,6 +14,7 @@ export function ConversationClient({
     <Conversation
       initialDetail={initialDetail}
       initialHistory={initialHistory}
+      autoFocusInput={initialHistory.messages.length === 0}
     />
   );
 }

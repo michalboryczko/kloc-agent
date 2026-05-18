@@ -34,7 +34,7 @@ export function Thread({
         {state.messages.length === 0 ? (
           <p
             data-test="thread-empty"
-            className="text-center text-[12px] text-[--color-ink-muted]"
+            className="text-center text-[12px] text-[var(--color-ink-muted)]"
           >
             Ask the first question to begin this session.
           </p>

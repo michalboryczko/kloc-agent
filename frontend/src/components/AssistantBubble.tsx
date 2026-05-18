@@ -22,7 +22,7 @@ export function AssistantBubble({
       data-seq={message.seq ?? undefined}
       className="flex gap-3 mb-7"
     >
-      <div className="w-7 h-7 rounded-md bg-[--color-chip-bg] grid place-items-center shrink-0">
+      <div className="w-7 h-7 rounded-md bg-[var(--color-chip-bg)] grid place-items-center shrink-0">
         <svg
           width={13}
           height={13}
@@ -32,7 +32,7 @@ export function AssistantBubble({
           strokeWidth={1.8}
           strokeLinecap="round"
           strokeLinejoin="round"
-          className="text-[--color-chip-fg]"
+          className="text-[var(--color-chip-fg)]"
           aria-hidden
         >
           <path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2Z" />
@@ -68,7 +68,7 @@ export function AssistantBubble({
               type="button"
               data-test="retry-message"
               onClick={onRetry}
-              className="mono text-[11px] px-2 py-1 rounded border border-[--color-danger-line] bg-[--color-danger-bg] text-[--color-danger-ink] hover:opacity-90"
+              className="mono text-[11px] px-2 py-1 rounded border border-[var(--color-danger-line)] bg-[var(--color-danger-bg)] text-[var(--color-danger-ink)] hover:opacity-90"
             >
               retry
             </button>

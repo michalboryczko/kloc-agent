@@ -6,8 +6,8 @@ export function RailFooter({
   meta?: string;
 }) {
   return (
-    <div className="px-3 py-2.5 border-t border-[--color-line] bg-[--color-canvas-rail]">
-      <div className="flex items-center gap-1.5 text-[--color-ink-muted]">
+    <div className="px-3 py-2.5 border-t border-[var(--color-line)] bg-[var(--color-canvas-rail)]">
+      <div className="flex items-center gap-1.5 text-[var(--color-ink-muted)]">
         <svg
           width={12}
           height={12}
@@ -27,7 +27,7 @@ export function RailFooter({
         <span className="mono text-[11px] truncate">{repo}</span>
       </div>
       {meta && (
-        <p className="mono text-[10px] text-[--color-ink-faint] pl-[18px] mt-0.5">
+        <p className="mono text-[10px] text-[var(--color-ink-faint)] pl-[18px] mt-0.5">
           {meta}
         </p>
       )}

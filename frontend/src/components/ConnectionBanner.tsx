@@ -22,13 +22,13 @@ const TONE: Record<ConnectionState, string> = {
   idle: "",
   live: "",
   connecting:
-    "bg-[--color-canvas-sunk] border-[--color-line] text-[--color-ink-muted]",
+    "bg-[var(--color-canvas-sunk)] border-[var(--color-line)] text-[var(--color-ink-muted)]",
   replaying:
-    "bg-[--color-canvas-sunk] border-[--color-line] text-[--color-ink-muted]",
+    "bg-[var(--color-canvas-sunk)] border-[var(--color-line)] text-[var(--color-ink-muted)]",
   offline:
-    "bg-[--color-canvas-sunk] border-[--color-warning]/40 text-[--color-warning]",
+    "bg-[var(--color-canvas-sunk)] border-[var(--color-warning)]/40 text-[var(--color-warning)]",
   error:
-    "bg-[--color-danger-bg] border-[--color-danger-line] text-[--color-danger-ink]",
+    "bg-[var(--color-danger-bg)] border-[var(--color-danger-line)] text-[var(--color-danger-ink)]",
 };
 
 export function ConnectionBanner({

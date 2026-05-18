@@ -15,13 +15,13 @@ export function ConversationHeader({
   closed: boolean;
 }) {
   return (
-    <header className="flex items-center justify-between px-5 py-3 border-b border-[--color-line] shrink-0">
+    <header className="flex items-center justify-between px-5 py-3 border-b border-[var(--color-line)] shrink-0">
       <div className="flex items-center gap-3 min-w-0">
         <Link
           href="/"
           data-test="back-btn"
           aria-label="Back to sessions"
-          className="p-1 -ml-1 rounded hover:bg-[--color-canvas-sunk] text-[--color-ink-muted]"
+          className="p-1 -ml-1 rounded hover:bg-[var(--color-canvas-sunk)] text-[var(--color-ink-muted)]"
         >
           <svg
             width={16}
@@ -44,7 +44,7 @@ export function ConversationHeader({
           >
             {title}
           </h1>
-          <p className="mono text-[11px] text-[--color-ink-muted] mt-0.5">
+          <p className="mono text-[11px] text-[var(--color-ink-muted)] mt-0.5">
             <span data-test="thread-id">{sessionId}</span>
             <span aria-hidden> · </span>
             <span>{messageCount} messages</span>
@@ -53,7 +53,7 @@ export function ConversationHeader({
                 <span aria-hidden> · </span>
                 <span
                   data-test="closed-session-indication"
-                  className="text-[--color-warning]"
+                  className="text-[var(--color-warning)]"
                 >
                   CLOSED
                 </span>
@@ -62,7 +62,7 @@ export function ConversationHeader({
           </p>
         </div>
       </div>
-      <div className="flex items-center gap-1 shrink-0 text-[--color-ink-muted]">
+      <div className="flex items-center gap-1 shrink-0 text-[var(--color-ink-muted)]">
         <ThemeToggle />
       </div>
     </header>
