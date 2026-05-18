@@ -1,0 +1,490 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<spec section="interfaces" system="kloc-agent" version="0.1.0" lang-version="1.0.0">
+
+  <!-- ============================================================
+       Scope: only contracts whose `provider` is an internal unit.
+       The Anthropic / Gemini / kloc-intelligence-MCP / Docker
+       daemon contracts are deliberately omitted — those external
+       parties own their own schemas.
+
+       Three internal providers expose contracts:
+         * `top.backend` — public REST, public SSE, internal ingress
+           (runner↔backend), and runner webhooks.
+         * `top.frontend-bff` — the Next.js BFF SSE pass-through.
+
+       Schema-refs point at the FastAPI-generated OpenAPI document
+       (served from `top.backend` at `/openapi.json`) and at a
+       separate AsyncAPI document the team maintains for the
+       runner→backend NDJSON stream. The schema files are tracked
+       under `docs/schemas/`.
+       =========================== -->
+
+  <!-- ============================================================
+       Contract A: public REST surface exposed by the backend
+       to the browser and the SSR-side Next.js process.
+       =========================== -->
+
+  <contract id="ifc.public-rest"
+            provider="top.backend"
+            consumers="top.browser,top.frontend"
+            style="rest"
+            spec-ref="./schemas/backend.openapi.json">
+
+    <operation id="ifc.list-sessions"
+               contract="ifc.public-rest"
+               name="GET /v1/sessions"
+               intent="Return the Analyst's Sessions newest-first with title, message count, runner state, and timestamps."
+               mode="sync-request-response"
+               consistency="read-your-writes"
+               delivery="at-most-once"
+               idempotency="not-applicable"
+               realizes-behavior="beh.browse-sessions"
+               governed-by="com.flow.list-sessions">
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1sessions/get/responses/200"/>
+      <failure-mode condition="db-unavailable"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+
+    <operation id="ifc.create-session"
+               contract="ifc.public-rest"
+               name="POST /v1/sessions"
+               intent="Create a new OPEN Session for the Analyst, audit it, and return its id and creation time."
+               mode="sync-request-response"
+               consistency="strong"
+               delivery="at-most-once"
+               idempotency="not-applicable"
+               realizes-behavior="beh.start-new-session"
+               governed-by="com.flow.create-session">
+      <schema-ref role="input"  format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1sessions/post/requestBody"/>
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1sessions/post/responses/201"/>
+      <failure-mode condition="validation-failure"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="db-unavailable"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+
+    <operation id="ifc.get-session"
+               contract="ifc.public-rest"
+               name="GET /v1/sessions/{session_id}"
+               intent="Return the Session header (analyst, title, runner-state, timestamps, closed-at, metadata)."
+               mode="sync-request-response"
+               consistency="read-your-writes"
+               delivery="at-most-once"
+               idempotency="not-applicable"
+               realizes-behavior="beh.resume-session"
+               governed-by="com.flow.get-session">
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1sessions~1%7Bsession_id%7D/get/responses/200"/>
+      <failure-mode condition="not-found"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+
+    <operation id="ifc.list-messages"
+               contract="ifc.public-rest"
+               name="GET /v1/sessions/{session_id}/messages"
+               intent="Return a page of the Session's prior Messages in seq order with a cursor for older pages."
+               mode="sync-request-response"
+               consistency="read-your-writes"
+               delivery="at-most-once"
+               idempotency="not-applicable"
+               realizes-behavior="beh.resume-session"
+               governed-by="com.flow.list-messages">
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1sessions~1%7Bsession_id%7D~1messages/get/responses/200"/>
+      <failure-mode condition="not-found"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+
+    <operation id="ifc.close-session"
+               contract="ifc.public-rest"
+               name="POST /v1/sessions/{session_id}/close"
+               intent="Mark a Session CLOSED so no further Messages are accepted; idempotent for already-closed Sessions."
+               mode="sync-request-response"
+               consistency="strong"
+               delivery="at-most-once"
+               idempotency="required">
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1sessions~1%7Bsession_id%7D~1close/post/responses/204"/>
+      <failure-mode condition="not-found"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+
+    <operation id="ifc.cancel-run"
+               contract="ifc.public-rest"
+               name="POST /v1/sessions/{session_id}/runs/{run_id}/cancel"
+               intent="Best-effort cancel an in-flight run on its Session's runner; always 204 even if the registry has no entry."
+               mode="sync-request-response"
+               consistency="eventual"
+               delivery="at-most-once"
+               idempotency="required">
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1sessions~1%7Bsession_id%7D~1runs~1%7Brun_id%7D~1cancel/post/responses/204"/>
+      <failure-mode condition="not-found"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+
+    <operation id="ifc.get-artifact"
+               contract="ifc.public-rest"
+               name="GET /v1/artifacts/{artifact_id}"
+               intent="Redirect the caller to a 900 s presigned MinIO URL for the Artifact's bytes."
+               mode="sync-request-response"
+               consistency="read-your-writes"
+               delivery="at-most-once"
+               idempotency="not-applicable"
+               realizes-behavior="beh.ask-assistant"
+               governed-by="com.flow.get-artifact">
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1artifacts~1%7Bartifact_id%7D/get/responses/302"/>
+      <failure-mode condition="not-found"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="object-store-unavailable"
+                    caller-action="retry-with-backoff"
+                    provider-promise="at-least-attempted"/>
+    </operation>
+  </contract>
+
+  <!-- ============================================================
+       Contract B: public SSE surface exposed by the backend.
+       Logically separate from `ifc.public-rest` because it is
+       stream-push, not request/response, and because the BFF is its
+       primary consumer (the browser only reaches it via the BFF
+       proxy — see Contract C).
+       =========================== -->
+
+  <contract id="ifc.public-sse"
+            provider="top.backend"
+            consumers="top.frontend-bff"
+            style="custom"
+            spec-ref="./schemas/agui-events.asyncapi.yaml">
+
+    <operation id="ifc.open-run-stream"
+               contract="ifc.public-sse"
+               name="POST /v1/sessions/{session_id}/stream"
+               intent="Persist the Analyst's user Message, spawn or reuse the Session's runner, and stream the AG-UI events of the resulting run as SSE."
+               mode="stream-push"
+               consistency="eventual"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.ask-assistant"
+               governed-by="com.flow.open-run-stream">
+      <schema-ref role="input"  format="asyncapi"
+                  uri="./schemas/agui-events.asyncapi.yaml#/components/messages/RunAgentInput"/>
+      <schema-ref role="event"  format="asyncapi"
+                  uri="./schemas/agui-events.asyncapi.yaml#/channels/run-stream"/>
+      <failure-mode condition="validation-failure"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="session-closed"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="runner-spawn-failed"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="runner-crashed"
+                    caller-action="fail-fast"
+                    provider-promise="terminal-frame-emitted"/>
+      <failure-mode condition="client-disconnect"
+                    caller-action="log-and-ignore"
+                    provider-promise="run-continues-server-side"/>
+    </operation>
+
+    <operation id="ifc.resume-run-stream"
+               contract="ifc.public-sse"
+               name="GET /v1/sessions/{session_id}/stream"
+               intent="Replay events past last_event_id from the ExecutionRegistry ring then tail the live run, so a disconnected Analyst can pick up where their cursor was."
+               mode="stream-push"
+               consistency="eventual"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.recover-from-disconnect"
+               governed-by="com.flow.resume-run-stream">
+      <schema-ref role="event"  format="asyncapi"
+                  uri="./schemas/agui-events.asyncapi.yaml#/channels/run-stream"/>
+      <failure-mode condition="unknown-execution"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="recovery-window-exceeded"
+                    caller-action="fallback-to-degraded"
+                    provider-promise="finalized-history-still-available"/>
+      <failure-mode condition="client-disconnect"
+                    caller-action="log-and-ignore"
+                    provider-promise="run-continues-server-side"/>
+    </operation>
+  </contract>
+
+  <!-- ============================================================
+       Contract C: BFF SSE pass-through exposed by the Next.js
+       frontend to the browser. Pure proxy — same wire shape as
+       `ifc.public-sse` but bound to the frontend's same-origin
+       URL space. The browser only ever sees this contract for
+       streaming traffic.
+       =========================== -->
+
+  <contract id="ifc.bff-sse"
+            provider="top.frontend-bff"
+            consumers="top.browser"
+            style="custom"
+            spec-ref="./schemas/agui-events.asyncapi.yaml">
+
+    <operation id="ifc.bff-open-run-stream"
+               contract="ifc.bff-sse"
+               name="POST /api/agent-proxy"
+               intent="Same-origin proxy: forward the Analyst's RunAgentInput envelope to the backend's open-run-stream and pipe its SSE body back unchanged."
+               mode="stream-push"
+               consistency="eventual"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.ask-assistant">
+      <schema-ref role="input"  format="asyncapi"
+                  uri="./schemas/agui-events.asyncapi.yaml#/components/messages/RunAgentInput"/>
+      <schema-ref role="event"  format="asyncapi"
+                  uri="./schemas/agui-events.asyncapi.yaml#/channels/run-stream"/>
+      <failure-mode condition="validation-failure"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="upstream-5xx"
+                    caller-action="fail-fast"
+                    provider-promise="status-mirrored-to-caller"/>
+    </operation>
+
+    <operation id="ifc.bff-resume-run-stream"
+               contract="ifc.bff-sse"
+               name="GET /api/agent-proxy/resume"
+               intent="Same-origin proxy: forward the reconnect query (session_id, run_id, last_event_id) to the backend's resume-run-stream and pipe its SSE body back unchanged."
+               mode="stream-push"
+               consistency="eventual"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.recover-from-disconnect">
+      <schema-ref role="event"  format="asyncapi"
+                  uri="./schemas/agui-events.asyncapi.yaml#/channels/run-stream"/>
+      <failure-mode condition="validation-failure"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="recovery-window-exceeded"
+                    caller-action="fallback-to-degraded"
+                    provider-promise="upstream-4xx-mirrored"/>
+    </operation>
+  </contract>
+
+  <!-- ============================================================
+       Contract D: internal runner-to-backend NDJSON event ingress.
+       NOT exposed beyond the compose bridge — the runner is the
+       only consumer. The companion long-poll inbox operation that
+       used to live alongside `ifc.ingest-runner-events` is gone;
+       backend-to-runner traffic now flows over PGMQ (Contract G).
+       =========================== -->
+
+  <contract id="ifc.internal-runner-ingress"
+            provider="top.backend"
+            consumers="top.runner"
+            style="custom"
+            spec-ref="./schemas/agui-events.asyncapi.yaml">
+
+    <operation id="ifc.ingest-runner-events"
+               contract="ifc.internal-runner-ingress"
+               name="POST /internal/sessions/{session_id}/events"
+               intent="Receive the runner's chunked NDJSON stream of AG-UI frames plus liveness heartbeats; route each frame to the in-process EventBus and the ExecutionRegistry ring."
+               mode="stream-push"
+               consistency="eventual"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.ask-assistant"
+               governed-by="com.flow.ingest-runner-events">
+      <schema-ref role="event"  format="asyncapi"
+                  uri="./schemas/agui-events.asyncapi.yaml#/channels/runner-ingress"/>
+      <failure-mode condition="oversized-frame"
+                    caller-action="fail-fast"
+                    provider-promise="connection-closed"/>
+      <failure-mode condition="invalid-jsonl"
+                    caller-action="fail-fast"
+                    provider-promise="connection-closed"/>
+      <failure-mode condition="client-disconnect"
+                    caller-action="retry-with-backoff"
+                    provider-promise="frames-already-dispatched-persist"/>
+    </operation>
+  </contract>
+
+  <!-- ============================================================
+       Contract G: PGMQ-backed durable inbox bus. Replaces the
+       deleted long-poll HTTP inbox. Provider is `top.postgres`
+       (the queue rows ARE the wire); both backend and runner are
+       consumers — backend produces (`inbox-enqueue`), runner
+       consumes (`inbox-consume`) and acks (`inbox-ack`). Queue
+       identity is keyed by `session_id` alone so a fresh runner
+       attaching to the same Session reads from the same queue —
+       the structural fix for the queue-identity-drift root cause
+       documented in tasks/fix-runner-inbox/root-cause.md.
+       =========================== -->
+
+  <contract id="ifc.inbox-bus"
+            provider="top.postgres"
+            consumers="top.backend,top.runner"
+            style="command-bus"
+            spec-ref="./schemas/inbox.asyncapi.yaml">
+
+    <operation id="ifc.inbox-enqueue"
+               contract="ifc.inbox-bus"
+               name="pgmq.send + NOTIFY inbox_{slug}"
+               intent="Enqueue one user-message frame onto the Session's durable inbox queue and wake any LISTEN-ing consumer immediately."
+               mode="sync-request-response"
+               consistency="strong"
+               delivery="at-least-once"
+               idempotency="not-applicable"
+               realizes-behavior="beh.ask-assistant"
+               governed-by="com.flow.open-run-stream">
+      <schema-ref role="input"  format="asyncapi"
+                  uri="./schemas/inbox.asyncapi.yaml#/components/messages/InboxFrame"/>
+      <schema-ref role="output" format="asyncapi"
+                  uri="./schemas/inbox.asyncapi.yaml#/components/messages/EnqueueResult"/>
+      <failure-mode condition="extension-missing"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="db-unavailable"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+
+    <operation id="ifc.inbox-consume"
+               contract="ifc.inbox-bus"
+               name="LISTEN inbox_{slug} + pgmq.read(vt=300, qty=1)"
+               intent="Block on the Session's inbox until a user-message arrives, then return exactly one queued frame with a 300 s visibility timeout so non-acked redelivery covers consumer death."
+               mode="stream-pull"
+               consistency="strong"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.ask-assistant"
+               governed-by="com.flow.runner-inbox-consume">
+      <schema-ref role="output" format="asyncapi"
+                  uri="./schemas/inbox.asyncapi.yaml#/components/messages/InboxFrame"/>
+      <failure-mode condition="notify-missed-during-reconnect"
+                    caller-action="retry-with-backoff"
+                    provider-promise="fallback-poll-30s-wakes-listener"/>
+      <failure-mode condition="db-connection-lost"
+                    caller-action="retry-with-backoff"
+                    provider-promise="unacked-message-redelivered-after-vt"/>
+    </operation>
+
+    <operation id="ifc.inbox-ack"
+               contract="ifc.inbox-bus"
+               name="pgmq.delete(queue, msg_id)"
+               intent="Acknowledge a successfully processed inbox frame so PGMQ does not redeliver it after the visibility timeout."
+               mode="sync-request-response"
+               consistency="strong"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.ask-assistant"
+               governed-by="com.flow.runner-inbox-consume">
+      <schema-ref role="input"  format="asyncapi"
+                  uri="./schemas/inbox.asyncapi.yaml#/components/messages/AckRequest"/>
+      <failure-mode condition="db-unavailable"
+                    caller-action="retry-with-backoff"
+                    provider-promise="message-redelivered-on-vt-expiry"/>
+    </operation>
+  </contract>
+
+  <!-- ============================================================
+       Contract E: HMAC-authenticated webhooks the runner posts to
+       the backend on tool-call lifecycle and artifact registration.
+       Same provider, different style, different security model
+       (per-runner HMAC secret vs same-bridge implicit trust).
+       =========================== -->
+
+  <contract id="ifc.runner-webhooks"
+            provider="top.backend"
+            consumers="top.runner"
+            style="rest"
+            spec-ref="./schemas/backend.openapi.json">
+
+    <operation id="ifc.runner-webhook"
+               contract="ifc.runner-webhooks"
+               name="POST /v1/webhooks/runners/{runner_id}/events"
+               intent="Receive a Strands-lifecycle hook (BeforeToolCall / AfterToolCall / ArtifactRegistered), verify HMAC, run policy, persist an audit row, and return the policy decision."
+               mode="sync-request-response"
+               consistency="strong"
+               delivery="at-most-once"
+               idempotency="required"
+               realizes-behavior="beh.ask-assistant"
+               governed-by="com.flow.runner-webhook">
+      <schema-ref role="input"  format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1webhooks~1runners~1%7Brunner_id%7D~1events/post/requestBody"/>
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1v1~1webhooks~1runners~1%7Brunner_id%7D~1events/post/responses/202"/>
+      <failure-mode condition="missing-auth-headers"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="invalid-hmac"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="stale-timestamp"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="unknown-runner"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="unsupported-event"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="duplicate-artifact"
+                    caller-action="log-and-ignore"
+                    provider-promise="effect-idempotent-on-retry"/>
+    </operation>
+  </contract>
+
+  <!-- ============================================================
+       Contract F: liveness / readiness exposed by the backend to
+       container orchestration (compose healthcheck, Kubernetes
+       probes). Not consumed by any application unit at runtime,
+       hence consumers="top.docker-daemon" — the daemon's
+       healthcheck probe is the only documented caller.
+       =========================== -->
+
+  <contract id="ifc.ops-health"
+            provider="top.backend"
+            consumers="top.docker-daemon"
+            style="rest"
+            spec-ref="./schemas/backend.openapi.json">
+
+    <operation id="ifc.healthz"
+               contract="ifc.ops-health"
+               name="GET /healthz"
+               intent="Return 200 once the FastAPI process is accepting traffic, regardless of downstream dependency health."
+               mode="sync-request-response"
+               consistency="not-applicable"
+               delivery="at-most-once"
+               idempotency="not-applicable">
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1healthz/get/responses/200"/>
+    </operation>
+
+    <operation id="ifc.readyz"
+               contract="ifc.ops-health"
+               name="GET /readyz"
+               intent="Probe Postgres (SELECT 1) and S3 (list_buckets); return 200 only if both are reachable, otherwise 503 with a per-check status map."
+               mode="sync-request-response"
+               consistency="not-applicable"
+               delivery="at-most-once"
+               idempotency="not-applicable">
+      <schema-ref role="output" format="openapi"
+                  uri="./schemas/backend.openapi.json#/paths/~1readyz/get/responses/200"/>
+      <failure-mode condition="db-unavailable"
+                    caller-action="fail-fast"
+                    provider-promise="reports-degraded-with-check-map"/>
+      <failure-mode condition="object-store-unavailable"
+                    caller-action="fail-fast"
+                    provider-promise="reports-degraded-with-check-map"/>
+    </operation>
+  </contract>
+
+</spec>

@@ -113,7 +113,7 @@ export function Sidebar({ activeId }: { activeId?: string }) {
         )}
       </nav>
 
-      <RailFooter repo="mrandmrssmith/api" meta="indexed PHP codebase" />
+      <RailFooter repo="—" meta="no codebase connected" />
     </aside>
   );
 }

@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>kloc analyst</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style type="text/tailwindcss">
+  @theme {
+    --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --color-ink: #0c0a09;
+    --color-ink-muted: #57534d;
+    --color-ink-faint: #a8a29e;
+    --color-line: #e7e5e3;
+    --color-line-strong: #d6d3d0;
+    --color-canvas: #ffffff;
+    --color-canvas-rail: #faf9f7;
+    --color-canvas-sunk: #f5f4f1;
+    --color-accent: #2b5cff;
+    --color-success: #15803d;
+    --color-warning: #b45309;
+    --color-danger-bg: #fef2f2;
+    --color-danger-line: #fecaca;
+    --color-danger-ink: #991b1b;
+  }
+  body { font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+  .mono { font-family: var(--font-mono); font-feature-settings: "ss01", "ss02"; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .spin { animation: spin 1s linear infinite; transform-origin: center; display: inline-block; }
+  .blink { animation: blink 1s steps(2) infinite; display: inline-block; }
+  .pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+  /* subtle scrollbar */
+  .scroll::-webkit-scrollbar { width: 8px; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--color-line); border-radius: 4px; }
+  .scroll::-webkit-scrollbar-track { background: transparent; }
+</style>
+<script type="importmap">
+  { "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client"
+  } }
+</script>
+</head>
+<body class="bg-[--color-canvas-sunk] text-[--color-ink]">
+<div id="root"></div>
+<script type="module">
+import React, { useState } from "react";
+import { createRoot } from "react-dom/client";
+
+const h = React.createElement;
+
+/* ---------- Icons (inline SVG, no library) ---------- */
+const Icon = ({ d, className = "", size = 16, strokeWidth = 1.6 }) =>
+  h("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth, strokeLinecap: "round", strokeLinejoin: "round", className, "aria-hidden": true },
+    Array.isArray(d) ? d.map((p, i) => h("path", { key: i, d: p })) : h("path", { d })
+  );
+
+const ICONS = {
+  plus: "M5 12h14M12 5v14",
+  arrowLeft: "M19 12H5M12 19l-7-7 7-7",
+  arrowUp: "M12 19V5M5 12l7-7 7 7",
+  search: ["M21 21l-4.3-4.3", "M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16Z"],
+  dots: "M5 12h.01M12 12h.01M19 12h.01",
+  check: "M20 6 9 17l-5-5",
+  ban: ["M4.93 4.93l14.14 14.14", "M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18Z"],
+  loader: ["M12 3v3", "M12 18v3", "M5.6 5.6l2.1 2.1", "M16.3 16.3l2.1 2.1", "M3 12h3", "M18 12h3", "M5.6 18.4l2.1-2.1", "M16.3 7.7l2.1-2.1"],
+  file: ["M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10z", "M13 3v7h7"],
+  download: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M7 10l5 5 5-5", "M12 15V3"],
+  database: ["M12 7c4.97 0 9-1.34 9-3s-4.03-3-9-3-9 1.34-9 3 4.03 3 9 3Z", "M3 4v6c0 1.66 4.03 3 9 3s9-1.34 9-3V4", "M3 10v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6", "M3 16v4c0 1.66 4.03 3 9 3s9-1.34 9-3v-4"],
+  sparkle: "M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4L12 2Z",
+};
+
+/* ---------- Mock data ---------- */
+const SESSIONS = [
+  { group: "Today", items: [
+    { id: "7f3a1b2c", title: "Audit auth flow", count: 12, when: "14:32" },
+    { id: "9b22e5d1", title: "Refactor queue jobs", count: 31, when: "11:08" },
+    { id: "4c81f0aa", title: "Find booking race", count:  8, when: "09:47" },
+  ]},
+  { group: "Earlier", items: [
+    { id: "2e6b7c10", title: "Migrate Doctrine ORM",     count: 47, when: "Sat" },
+    { id: "8f01a3bd", title: "Symfony 5.4 → 6.4 cache",  count: 19, when: "Fri" },
+    { id: "5d4421ef", title: "Route similarity DTW",     count: 23, when: "Thu" },
+  ]},
+];
+
+/* ---------- Sidebar ---------- */
+function Sidebar({ activeId, onSelect }) {
+  return h("aside", { className: "w-[260px] shrink-0 flex flex-col bg-[--color-canvas-rail] border-r border-[--color-line]" },
+    /* Brand + new */
+    h("div", { className: "p-3 border-b border-[--color-line]" },
+      h("div", { className: "flex items-center gap-2 mb-3 px-1" },
+        h("div", { className: "w-6 h-6 rounded-[6px] bg-[--color-ink] grid place-items-center" },
+          h(Icon, { d: ICONS.sparkle, size: 13, strokeWidth: 1.8, className: "text-white" })
+        ),
+        h("span", { className: "text-[13px] font-medium tracking-tight" }, "kloc"),
+        h("span", { className: "mono text-[10px] text-[--color-ink-faint] ml-auto" }, "v0.1")
+      ),
+      h("button", { className: "w-full flex items-center justify-center gap-1.5 text-[13px] font-medium py-1.5 rounded-md border border-[--color-line-strong] bg-white hover:bg-[--color-canvas-sunk] transition-colors" },
+        h(Icon, { d: ICONS.plus, size: 14 }),
+        "New session"
+      )
+    ),
+    /* Sessions */
+    h("nav", { className: "flex-1 overflow-y-auto scroll px-2 py-2 min-h-0" },
+      SESSIONS.map(group =>
+        h("div", { key: group.group, className: "mb-3" },
+          h("p", { className: "mono text-[9.5px] tracking-[0.12em] text-[--color-ink-faint] uppercase px-2 mb-1" }, group.group),
+          group.items.map(s => {
+            const isActive = s.id === activeId;
+            return h("button", {
+              key: s.id,
+              onClick: () => onSelect(s.id),
+              className: [
+                "w-full text-left px-2.5 py-2 rounded-md transition-colors block",
+                isActive
+                  ? "bg-white ring-1 ring-[--color-line-strong] shadow-[0_1px_0_rgba(0,0,0,0.02)]"
+                  : "hover:bg-white/60"
+              ].join(" ")
+            },
+              h("div", { className: "flex items-center gap-2 mb-0.5" },
+                isActive && h("span", { className: "w-1.5 h-1.5 rounded-full bg-[--color-accent] shrink-0 pulse-dot" }),
+                h("span", { className: "text-[13px] font-medium truncate" + (isActive ? "" : " text-[--color-ink]") }, s.title)
+              ),
+              h("div", { className: "flex items-center gap-1.5 text-[11px] text-[--color-ink-muted]" + (isActive ? " pl-3.5" : "") },
+                h("span", { className: "mono" }, s.id.slice(0, 7)),
+                h("span", null, "·"),
+                h("span", null, s.count, " msgs"),
+                h("span", { className: "ml-auto mono" }, s.when)
+              )
+            );
+          })
+        )
+      )
+    ),
+    /* Repo footer */
+    h("div", { className: "px-3 py-2.5 border-t border-[--color-line] bg-[--color-canvas-rail]" },
+      h("div", { className: "flex items-center gap-1.5 text-[--color-ink-muted]" },
+        h(Icon, { d: ICONS.database, size: 12 }),
+        h("span", { className: "mono text-[11px] truncate" }, "mrandmrssmith/api")
+      ),
+      h("p", { className: "mono text-[10px] text-[--color-ink-faint] pl-[18px] mt-0.5" }, "4,217 files · PHP 8.2")
+    )
+  );
+}
+
+/* ---------- Tool call rail item ---------- */
+function ToolCall({ state, name, args, meta }) {
+  const styles = {
+    done:    { wrap: "border-[--color-line] bg-white",                            icon: h(Icon, { d: ICONS.check,  size: 13, strokeWidth: 2, className: "text-[--color-success]" }) },
+    running: { wrap: "border-[--color-line] bg-white",                            icon: h(Icon, { d: ICONS.loader, size: 13, strokeWidth: 2, className: "text-[--color-warning] spin" }) },
+    denied:  { wrap: "border-[--color-danger-line] bg-[--color-danger-bg]",        icon: h(Icon, { d: ICONS.ban,    size: 13, strokeWidth: 2, className: "text-[--color-danger-ink]" }) },
+  }[state];
+  const isDenied = state === "denied";
+  return h("div", { className: "border rounded-md px-2.5 py-1.5 mb-1.5 " + styles.wrap },
+    h("div", { className: "flex items-center gap-2 min-w-0" },
+      styles.icon,
+      h("span", { className: "mono text-[12px] font-medium " + (isDenied ? "text-[--color-danger-ink]" : "") }, name),
+      h("span", { className: "mono text-[11px] truncate " + (isDenied ? "text-[--color-danger-ink]/80" : "text-[--color-ink-muted]") }, args),
+      h("span", { className: "ml-auto shrink-0 " + (isDenied
+        ? "mono text-[10px] font-medium tracking-[0.06em] text-[--color-danger-ink] border border-[--color-danger-line] rounded px-1.5 py-0.5"
+        : "text-[11px] text-[--color-ink-muted]")
+      }, meta)
+    )
+  );
+}
+
+/* ---------- Code chip ---------- */
+const Code = ({ children }) =>
+  h("span", { className: "mono text-[11.5px] bg-[--color-canvas-sunk] border border-[--color-line] px-1.5 py-px rounded" }, children);
+
+/* ---------- Main conversation ---------- */
+function Conversation({ session }) {
+  return h("main", { className: "flex-1 min-w-0 flex flex-col bg-[--color-canvas]" },
+    /* Header */
+    h("header", { className: "flex items-center justify-between px-5 py-3 border-b border-[--color-line] shrink-0" },
+      h("div", { className: "flex items-center gap-3 min-w-0" },
+        h("button", { className: "p-1 -ml-1 rounded hover:bg-[--color-canvas-sunk] text-[--color-ink-muted]", "aria-label": "Back" },
+          h(Icon, { d: ICONS.arrowLeft, size: 16 })
+        ),
+        h("div", { className: "min-w-0" },
+          h("h1", { className: "text-[14px] font-medium leading-tight truncate" }, session.title),
+          h("p", { className: "mono text-[11px] text-[--color-ink-muted] mt-0.5" }, session.id, " · ", session.count, " messages")
+        )
+      ),
+      h("div", { className: "flex items-center gap-1 shrink-0 text-[--color-ink-muted]" },
+        h("button", { className: "p-1.5 rounded hover:bg-[--color-canvas-sunk]", "aria-label": "Search" }, h(Icon, { d: ICONS.search, size: 15 })),
+        h("button", { className: "p-1.5 rounded hover:bg-[--color-canvas-sunk]", "aria-label": "Menu" },   h(Icon, { d: ICONS.dots,   size: 15 }))
+      )
+    ),
+
+    /* Thread */
+    h("div", { className: "flex-1 overflow-y-auto scroll px-5 py-6 min-h-0" },
+      h("div", { className: "max-w-[680px] mx-auto" },
+
+        /* Analyst */
+        h("div", { className: "flex gap-3 mb-7" },
+          h("div", { className: "w-7 h-7 rounded-full bg-[--color-accent]/10 text-[--color-accent] grid place-items-center shrink-0 mono text-[10px] font-medium" }, "MR"),
+          h("div", { className: "min-w-0 flex-1" },
+            h("div", { className: "flex items-baseline gap-2 mb-1" },
+              h("span", { className: "text-[12px] font-medium" }, "Analyst"),
+              h("span", { className: "mono text-[10.5px] text-[--color-ink-faint]" }, "14:31")
+            ),
+            h("p", { className: "text-[14px] leading-relaxed" }, "Where is the JWT secret loaded, and is it ever logged?")
+          )
+        ),
+
+        /* Assistant */
+        h("div", { className: "flex gap-3" },
+          h("div", { className: "w-7 h-7 rounded-md bg-[--color-ink] grid place-items-center shrink-0" },
+            h(Icon, { d: ICONS.sparkle, size: 13, strokeWidth: 1.8, className: "text-white" })
+          ),
+          h("div", { className: "min-w-0 flex-1" },
+            h("div", { className: "flex items-baseline gap-2 mb-2" },
+              h("span", { className: "text-[12px] font-medium" }, "kloc analyst"),
+              h("span", { className: "mono text-[10.5px] text-[--color-ink-faint]" }, "14:31")
+            ),
+
+            /* Tool call rail */
+            h(ToolCall, { state: "done",    name: "search_code", args: '"JWT_SECRET"',           meta: "14 results" }),
+            h(ToolCall, { state: "running", name: "read_file",   args: "src/Auth/JwtFactory.php", meta: "reading…"   }),
+            h(ToolCall, { state: "denied",  name: "read_file",   args: ".env",                    meta: "DENIED"     }),
+
+            /* Streaming text */
+            h("p", { className: "text-[14px] leading-[1.65] mt-3 mb-4" },
+              "Loaded from ", h(Code, null, "$_ENV['JWT_SECRET']"),
+              " in ", h(Code, null, "JwtFactory::__construct"),
+              ". The ", h(Code, null, ".env"), " file is blocked by policy, but the codebase search shows the secret never reaches a logger — every Monolog handler in ",
+              h(Code, null, "config/monolog.php"), " strips the auth context before",
+              h("span", { className: "blink text-[--color-ink-muted] ml-0.5" }, "▍")
+            ),
+
+            /* Artifact */
+            h("div", { className: "inline-flex items-center gap-2 px-2.5 py-1.5 rounded-md border border-[--color-line] bg-[--color-canvas-rail] hover:bg-white transition-colors cursor-pointer" },
+              h(Icon, { d: ICONS.file, size: 14, className: "text-[--color-ink-muted]" }),
+              h("span", { className: "mono text-[12px]" }, "jwt-flow.md"),
+              h("span", { className: "mono text-[10.5px] text-[--color-ink-muted]" }, "2.1 KB"),
+              h(Icon, { d: ICONS.download, size: 13, className: "text-[--color-ink-muted] ml-1" })
+            )
+          )
+        )
+      )
+    ),
+
+    /* Input */
+    h("div", { className: "border-t border-[--color-line] px-5 py-3 shrink-0" },
+      h("div", { className: "max-w-[680px] mx-auto" },
+        h("div", { className: "flex items-center gap-2 border border-[--color-line-strong] rounded-lg bg-white px-3 py-2 focus-within:ring-2 focus-within:ring-[--color-accent]/15 focus-within:border-[--color-accent]/40 transition" },
+          h("input", {
+            type: "text",
+            placeholder: "Ask about the codebase…",
+            className: "flex-1 outline-none text-[13.5px] bg-transparent placeholder:text-[--color-ink-faint]"
+          }),
+          h("kbd", { className: "mono text-[10px] text-[--color-ink-faint] border border-[--color-line] rounded px-1.5 py-0.5" }, "⌘ ↵"),
+          h("button", {
+            className: "w-7 h-7 grid place-items-center rounded-md bg-[--color-ink] text-white hover:bg-[--color-ink]/90 transition-colors",
+            "aria-label": "Send"
+          }, h(Icon, { d: ICONS.arrowUp, size: 13, strokeWidth: 2 }))
+        ),
+        h("p", { className: "mono text-[10px] text-[--color-ink-faint] mt-2 text-center" },
+          "Streaming over AG-UI · transport: SSE · cursor restores on reconnect"
+        )
+      )
+    )
+  );
+}
+
+/* ---------- Root ---------- */
+function App() {
+  const [activeId, setActiveId] = useState("7f3a1b2c");
+  const active = SESSIONS.flatMap(g => g.items).find(s => s.id === activeId);
+  return h("div", { className: "h-screen flex overflow-hidden" },
+    h(Sidebar, { activeId, onSelect: setActiveId }),
+    h(Conversation, { session: active })
+  );
+}
+
+createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>

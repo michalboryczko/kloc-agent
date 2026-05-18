@@ -11,10 +11,17 @@ PoC; see `docs/specs/kloc-agent-poc.md` for acceptance criteria and
 
 ```
 cp .env.example .env
-# Fill in ANTHROPIC_API_KEY at minimum.
+# Secrets are read from your shell, not committed in .env. Export at minimum:
+export GEMINI_API_KEY=...
+# (or ANTHROPIC_API_KEY=... if you set LLM_PROVIDER=anthropic)
 docker compose up -d
-curl http://localhost:8000/healthz   # expect {"status":"ok"}
+curl http://localhost:8002/healthz   # expect {"status":"ok"}
 ```
+
+`.env` is the single source of truth for backend, frontend, and compose.
+docker-compose loads it automatically from the project root; non-secret
+values live there, secrets stay in your shell and are interpolated by
+compose via `${VAR:-}` references. Do not put real keys in `.env`.
 
 ## Local development
 
@@ -28,10 +35,11 @@ bind-mounts `src/` for hot reload.
 
 | Service       | URL                       | Notes                                |
 | ------------- | ------------------------- | ------------------------------------ |
-| backend       | http://localhost:8000     | FastAPI                              |
+| frontend      | http://localhost:3000     | Next.js                              |
+| backend       | http://localhost:8002     | FastAPI (container port 8000 → host 8002) |
 | postgres      | localhost:5432            | `kloc / changeme` (override in .env) |
-| MinIO API     | http://localhost:9000     | S3 endpoint                          |
-| MinIO console | http://localhost:9001     | `minioadmin / minioadmin`            |
+| MinIO API     | http://localhost:9010     | S3 endpoint                          |
+| MinIO console | http://localhost:9011     | `minioadmin / minioadmin`            |
 
 ## Tests
 
@@ -44,9 +52,9 @@ uv run pytest -m e2e         # full compose + real Anthropic + Docker runner
 
 ```
 src/        backend (FastAPI + SQLAlchemy + aioboto3)
-runner/     in-container Strands Agent runtime (dev-2)
-skills/     bind-mounted into runners (dev-2)
-frontend/   Next.js + CopilotKit + AG-UI (dev-3)
+runner/     in-container Strands Agent runtime
+skills/     bind-mounted into runners
+frontend/   Next.js + CopilotKit + AG-UI
 migrations/ Alembic async
 tests/      unit / integration / e2e
 docs/       specs, architecture, research

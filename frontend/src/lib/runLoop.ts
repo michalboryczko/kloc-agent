@@ -86,7 +86,7 @@ export function useRunLoop(opts: UseRunLoopOptions): UseRunLoopReturn {
     async (
       stream: AsyncGenerator<AGUIEvent>,
       mode: "live" | "replay",
-    ): Promise<void> => {
+    ): Promise<{ sawTerminal: boolean }> => {
       let sawFirstAfterCursor = mode === "live";
       for await (const event of stream) {
         seqCounterRef.current += 1;
@@ -103,9 +103,10 @@ export function useRunLoop(opts: UseRunLoopOptions): UseRunLoopReturn {
         }
         dispatch({ type: "AGUI_EVENT", event, seq: seqCounterRef.current });
         if (event.type === "RUN_FINISHED" || event.type === "RUN_ERROR") {
-          return;
+          return { sawTerminal: true };
         }
       }
+      return { sawTerminal: false };
     },
     [],
   );
@@ -218,7 +219,7 @@ export function useRunLoop(opts: UseRunLoopOptions): UseRunLoopReturn {
 
       (async () => {
         try {
-          await consumeStream(
+          const result = await consumeStream(
             openRunStream({
               sessionId: state.detail!.id,
               runId,
@@ -229,6 +230,19 @@ export function useRunLoop(opts: UseRunLoopOptions): UseRunLoopReturn {
             }),
             "live",
           );
+          if (ctrl.signal.aborted) return;
+          if (result.sawTerminal) return;
+          if (stateRef.current.activeRunId !== null) {
+            dispatch({ type: "SET_CONNECTION", state: "offline", error: null });
+            scheduleReconnectRef.current(stateRef.current.activeRunId);
+            return;
+          }
+          dispatch({ type: "ROLLBACK_OPTIMISTIC", messageId: optimistic.id });
+          dispatch({
+            type: "SET_CONNECTION",
+            state: "error",
+            error: "Assistant did not respond. Try again.",
+          });
         } catch (e) {
           if (ctrl.signal.aborted) return;
           if (stateRef.current.connection === "live") {

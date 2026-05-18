@@ -3,7 +3,7 @@ import type { ConnectionState } from "@/lib/types";
 const VISIBLE: Record<ConnectionState, boolean> = {
   idle: false,
   live: false,
-  connecting: true,
+  connecting: false,
   replaying: true,
   offline: true,
   error: true,

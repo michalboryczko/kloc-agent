@@ -48,7 +48,7 @@
 - `mcp>=1.2,<2` — Model Context Protocol client SDK; used in `runner/mcp_clients.py`
 - `next 16.0.8` — React meta-framework; App Router; standalone output mode
 - `react ^19.2.1` + `react-dom ^19.2.1` — UI library
-- `@copilotkit/react-core 1.56.5`, `@copilotkit/react-ui 1.56.5`, `@copilotkit/runtime 1.56.5` — CopilotKit chat UI and runtime wiring (`frontend/src/app/api/copilotkit/route.ts`, `frontend/src/app/page.tsx`)
+- `@copilotkit/react-core`
 - `@ag-ui/client 0.0.42` — AG-UI JS client (`HttpAgent`) for direct agent communication (`frontend/src/lib/agui-http-agent.ts`, `frontend/src/app/api/copilotkit/route.ts`)
 - `zod ^3.23.8` — schema validation (available as dependency)
 - `pytest>=8.3` — test runner (`tests/`)

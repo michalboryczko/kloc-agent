@@ -1,0 +1,479 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<spec section="topology" system="kloc-agent" version="0.1.0" lang-version="1.0.0">
+
+  <!-- ============================================================
+       Units — runnable processes, datastores, and external systems
+       at the unit grain. Every unit referenced by interfaces.xml
+       (`provider`, `consumers`) and composition.xml (`in-unit`) is
+       defined here.
+
+       Process count at runtime: one Postgres, one MinIO, one Next.js
+       process, one FastAPI process, plus N per-session Runner
+       containers (one per active Session, spawned by `DockerRunner`).
+       =========================== -->
+
+  <unit id="top.backend" kind="service" owner="kloc-team">
+    <description>FastAPI process exposing the kloc-agent REST + SSE +
+    internal-ingestion surfaces, hosting the in-process EventBus, the
+    ExecutionRegistry replay ring, and the RunnerRegistry that spawns
+    one runner container per Session. Single uvicorn worker (process-
+    local dicts gate run-id routing). Listens on container port 8000,
+    published on host port 8002 in dev compose.</description>
+    <tech>Python 3.12, FastAPI, SQLAlchemy (asyncpg), aioboto3, aiodocker</tech>
+  </unit>
+
+  <unit id="top.frontend" kind="browser-app" owner="kloc-team">
+    <description>Next.js 16 / React 19 single-page chat surface for the
+    Analyst. Renders the Session list, the conversation view, the
+    pending Assistant indicator, Tool Call indicators (running /
+    completed / denied), and Artifact chips. Ships as a Next.js
+    standalone server (node server.js on port 3000) that also hosts
+    the BFF route handlers that proxy the SSE stream.</description>
+    <tech>Next.js 16, React 19, TypeScript 5.6, Tailwind 4</tech>
+  </unit>
+
+  <unit id="top.frontend-bff" kind="gateway" owner="kloc-team">
+    <description>Next.js route handlers under `/api/agent-proxy*`,
+    co-resident with `top.frontend` in the same Node process but a
+    logically distinct unit. POSTs new runs and GETs reconnects are
+    proxied through here so the browser only ever talks to its
+    same-origin Next server; the BFF then opens a chunked
+    `text/event-stream` connection to `top.backend` and pipes the
+    upstream body straight back to the browser unchanged.</description>
+    <tech>Next.js Route Handlers (Node runtime, `dynamic = "force-dynamic"`)</tech>
+  </unit>
+
+  <unit id="top.runner" kind="worker" owner="kloc-team"
+        consumes="evt.message-submitted">
+    <description>Per-Session container running `python -m runner` under
+    `opentelemetry-instrument`. Reads its HydrationPayload from
+    `/run/kloc/<runner_id>.json` (RO bind-mount), opens MCP clients,
+    builds a Strands `Agent` wrapped by `ag_ui_strands.StrandsAgent`,
+    long-polls the backend inbox for user-message frames, runs each
+    turn, and streams AG-UI events back over a chunked NDJSON POST.
+    Memory cap 1 GiB, 2 nano-CPUs, pids-limit 256, no restart
+    policy.</description>
+    <tech>Python 3.12, Strands Agent SDK, ag_ui_strands wrapper, httpx, MCP Python SDK</tech>
+  </unit>
+
+  <unit id="top.postgres" kind="database" owner="kloc-team">
+    <description>Authoritative durable store for the kloc-agent domain
+    state: `sessions`, `messages` (per-Session monotonic `seq`),
+    `audit_log` (locked vocabulary of 12 event names),
+    `artifact_metadata` (idempotent on `(session_id, object_key)`).
+    Also hosts the PGMQ extension which holds one durable inbox
+    queue per Session (`inbox_{session_id_no_dashes}`) — the
+    backend-to-runner transport for user-message frames, paired
+    with `NOTIFY inbox_{slug}` for sub-millisecond wake-up of the
+    runner's `LISTEN`. Queue rows survive runner eviction and
+    backend restart in the same WAL that protects `messages` and
+    `audit_log`. Reached over async asyncpg (pool size 10, max
+    overflow 20, pre-ping). Image swapped from `postgres:16-alpine`
+    to a pgmq-bundled flavour
+    (`quay.io/tembo/pg16-pgmq:latest`).</description>
+    <tech>PostgreSQL 16 + PGMQ extension</tech>
+  </unit>
+
+  <unit id="top.minio" kind="object-store" owner="kloc-team">
+    <description>S3-compatible blob store holding Artifact bodies the
+    runner uploads during a turn. Backend never writes content here —
+    it issues presigned GET URLs (900 s expiry) so the browser can
+    download an Artifact via a `Location:` redirect from the backend.
+    Bucket `kloc-agent-artifacts-dev` created by the `mc-init` compose
+    helper at boot.</description>
+    <tech>MinIO (S3-compatible), addressing-style `path`, signature v4</tech>
+  </unit>
+
+  <unit id="top.hydration-volume" kind="object-store" owner="kloc-team">
+    <description>Docker-managed named volume `kloc-hydration` mounted
+    `/tmp/kloc-hydration` (backend, RW) and `/run/kloc` (each runner,
+    RO). Backend writes one `<runner_id>.json` per spawn; the runner
+    reads it once at startup. Named-volume rather than bind-mount
+    because the backend container's relative paths don't resolve on
+    the host the way aiodocker sees them.</description>
+    <tech>Docker named volume</tech>
+  </unit>
+
+  <unit id="top.skills-volume" kind="object-store" owner="kloc-team">
+    <description>Docker-managed named volume `kloc-skills` seeded
+    from `./skills/` by the `skills-init` compose helper. Mounted
+    `/skills-source` (backend, RO) and `/skills` (each runner, RO).
+    Holds the SKILL.md files the runner discovers via
+    `agentskills.discover_skills` to assemble its system prompt.</description>
+    <tech>Docker named volume</tech>
+  </unit>
+
+  <unit id="top.docker-daemon" kind="external-api"
+        internal="false" owner="docker">
+    <description>The host's Docker engine. Reached by the backend over
+    the bind-mounted unix socket `/var/run/docker.sock`. The backend
+    uses aiodocker (Docker-outside-of-Docker, sibling-container
+    pattern) to create / start / inspect / stop / delete per-Session
+    runner containers on the shared `kloc` bridge network. The unix
+    socket bind-mount is mandatory; lifespan fails loudly without it.</description>
+  </unit>
+
+  <unit id="top.kloc-intelligence-mcp" kind="external-api"
+        internal="false" owner="operator">
+    <description>External Streamable-HTTP MCP server fronting the
+    operator's kloc-intelligence code-search stack (Neo4j + Qdrant +
+    `mcp-server-http`). Reached from each runner container at
+    `http://host.docker.internal:8765/mcp` (default). Brought up by
+    the operator out of band; the runner treats it as an opaque MCP
+    endpoint and binds whatever `list_tools_sync()` returns into the
+    Strands agent.</description>
+  </unit>
+
+  <unit id="top.llm-provider" kind="external-api"
+        internal="false" owner="anthropic-or-google">
+    <description>The selected LLM provider: Anthropic Messages API or
+    Google Gemini API (default `gemini` per dev compose). Called from
+    inside each runner container by the Strands model adapter the
+    `model_factory` selects from `llm_provider` in the
+    HydrationPayload. `openrouter` and `bedrock` are stubbed paths,
+    not wired.</description>
+  </unit>
+
+  <unit id="top.browser" kind="browser-app"
+        internal="false" owner="analyst">
+    <description>The Analyst's web browser. Renders `top.frontend`
+    pages, opens an `EventSource`-style streaming `fetch` against
+    `top.frontend-bff` for each Assistant turn, and follows the 302
+    redirect to MinIO when an Artifact chip is clicked. Out of the
+    system boundary.</description>
+  </unit>
+
+  <!-- ============================================================
+       Communications — every edge between two units. Every edge
+       declares all six required attributes; `carries` is set on
+       edges whose contract is documented in interfaces.xml.
+       =========================== -->
+
+  <!-- Analyst <-> Frontend -->
+
+  <communication id="top.com.browser-to-frontend"
+                 from="top.browser"
+                 to="top.frontend"
+                 via="http"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="at-most-once"
+                 backpressure="shed">
+    <note>Browser fetches the Next.js HTML/CSS/JS bundle and renders
+    the SPA. No documented contract — this is the SPA shell, not an
+    API surface.</note>
+  </communication>
+
+  <!-- Browser -> Backend (direct, for non-stream REST + artifact redirect) -->
+
+  <communication id="top.com.browser-to-backend-rest"
+                 from="top.browser"
+                 to="top.backend"
+                 via="http"
+                 mode="sync-request-response"
+                 consistency="read-your-writes"
+                 delivery="at-most-once"
+                 backpressure="shed"
+                 carries="ifc.list-sessions,ifc.create-session,ifc.get-session,ifc.list-messages,ifc.close-session,ifc.cancel-run,ifc.get-artifact">
+    <note>The browser fetches the public REST surface directly from
+    `top.backend` (host port 8002 in dev compose, behind permissive
+    CORS). The artifact GET returns 302 to a presigned MinIO URL the
+    browser follows itself.</note>
+  </communication>
+
+  <!-- Frontend -> Backend (SSR fetch for conversation page) -->
+
+  <communication id="top.com.frontend-to-backend-ssr"
+                 from="top.frontend"
+                 to="top.backend"
+                 via="http"
+                 mode="sync-request-response"
+                 consistency="read-your-writes"
+                 delivery="at-most-once"
+                 backpressure="shed"
+                 carries="ifc.get-session,ifc.list-messages">
+    <note>Server-side fetch from `app/s/[sessionId]/page.tsx` —
+    `Promise.all([getSession, listMessages])` — to hydrate the
+    conversation surface on first render.</note>
+  </communication>
+
+  <!-- Browser -> Frontend BFF (SSE pass-through for streaming runs) -->
+
+  <communication id="top.com.browser-to-bff-stream"
+                 from="top.browser"
+                 to="top.frontend-bff"
+                 via="http"
+                 mode="stream-push"
+                 consistency="eventual"
+                 delivery="at-least-once"
+                 backpressure="buffer"
+                 carries="ifc.bff-open-run-stream,ifc.bff-resume-run-stream">
+    <note>Browser opens a `fetch` against `/api/agent-proxy` (POST,
+    submit) or `/api/agent-proxy/resume` (GET, reconnect) and reads
+    the SSE body progressively. Direction is server→client streaming
+    after the initial request, hence `stream-push`. Cursor replay on
+    reconnect via `last_event_id`.</note>
+  </communication>
+
+  <!-- Frontend BFF -> Backend (proxied SSE stream) -->
+
+  <communication id="top.com.bff-to-backend-stream"
+                 from="top.frontend-bff"
+                 to="top.backend"
+                 via="http"
+                 mode="stream-push"
+                 consistency="eventual"
+                 delivery="at-least-once"
+                 backpressure="buffer"
+                 carries="ifc.open-run-stream,ifc.resume-run-stream">
+    <note>BFF opens the same shape upstream and pipes the response
+    body back to the browser unchanged. Cache-Control: no-cache,
+    no-transform; Connection: keep-alive.</note>
+  </communication>
+
+  <!-- Backend -> Postgres (OLTP — durable domain state) -->
+
+  <communication id="top.com.backend-to-postgres"
+                 from="top.backend"
+                 to="top.postgres"
+                 via="sql"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="not-applicable">
+    <note>Async asyncpg connection pool. Reads + writes for sessions,
+    messages, audit_log, artifact_metadata. Pure OLTP — the inbox
+    transport now flows over a separate logical edge
+    (`top.com.backend-to-postgres-inbox`) even though it shares the
+    same asyncpg pool.</note>
+  </communication>
+
+  <!-- Backend -> Postgres (PGMQ inbox producer + NOTIFY) -->
+
+  <communication id="top.com.backend-to-postgres-inbox"
+                 from="top.backend"
+                 to="top.postgres"
+                 via="sql"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="at-least-once"
+                 carries="ifc.inbox-enqueue">
+    <note>One round-trip per user-message: `pgmq.send(queue,
+    payload)` paired with `NOTIFY inbox_{slug}` in the same
+    transaction so the runner's `LISTEN` wakes the moment the row
+    commits. Queue name is derived from `session_id` alone
+    (`inbox_{session_id_no_dashes}`), NOT from any per-spawn
+    registry entry — that is what structurally eliminates the
+    "identity drift on eviction" failure class.</note>
+  </communication>
+
+  <!-- Backend -> MinIO (artifact presigning + readyz probe) -->
+
+  <communication id="top.com.backend-to-minio"
+                 from="top.backend"
+                 to="top.minio"
+                 via="http"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="at-most-once">
+    <note>aioboto3 S3 client. Used to issue presigned GET URLs and
+    for the `readyz` `list_buckets` liveness probe. Backend does not
+    write artifact bodies — the runner uploads directly, the backend
+    only stores metadata.</note>
+  </communication>
+
+  <!-- Runner -> MinIO (artifact body upload) -->
+
+  <communication id="top.com.runner-to-minio"
+                 from="top.runner"
+                 to="top.minio"
+                 via="http"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="at-most-once">
+    <note>The runner uploads Artifact bytes directly to MinIO during
+    a turn, then sends `ArtifactRegistered` to the backend so
+    `artifact_metadata` is inserted. Bucket and key are derived from
+    `artifact_object_key(session_id, artifact_id, filename)`.</note>
+  </communication>
+
+  <!-- Backend <-> Docker daemon (runner lifecycle) -->
+
+  <communication id="top.com.backend-to-docker"
+                 from="top.backend"
+                 to="top.docker-daemon"
+                 via="ipc"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="at-most-once">
+    <note>aiodocker over the bind-mounted `/var/run/docker.sock`.
+    create / start / stop(t=5) / wait / delete and label-filtered
+    `list` for the boot-time orphan sweep.</note>
+  </communication>
+
+  <!-- Backend -> Hydration volume (per-spawn payload file) -->
+
+  <communication id="top.com.backend-to-hydration-volume"
+                 from="top.backend"
+                 to="top.hydration-volume"
+                 via="file-system"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="not-applicable">
+    <note>Backend writes `<runner_id>.json` to
+    `/tmp/kloc-hydration/` before each spawn so the runner can read
+    it at `/run/kloc/<runner_id>.json` on first boot. Written once
+    per spawn, never updated.</note>
+  </communication>
+
+  <!-- Runner -> Hydration volume (single read at boot) -->
+
+  <communication id="top.com.runner-from-hydration-volume"
+                 from="top.runner"
+                 to="top.hydration-volume"
+                 via="file-system"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="not-applicable">
+    <note>Read-only mount. The runner reads its hydration file once
+    at startup; the 4 MiB cap is enforced before parsing.</note>
+  </communication>
+
+  <!-- Backend -> Skills volume (seeding) -->
+
+  <communication id="top.com.backend-to-skills-volume"
+                 from="top.backend"
+                 to="top.skills-volume"
+                 via="file-system"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="not-applicable">
+    <note>Backend mounts `kloc-skills` read-only at
+    `/skills-source` (the active seeding is owned by the `skills-init`
+    helper, not the backend at runtime).</note>
+  </communication>
+
+  <!-- Runner -> Skills volume -->
+
+  <communication id="top.com.runner-from-skills-volume"
+                 from="top.runner"
+                 to="top.skills-volume"
+                 via="file-system"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="not-applicable">
+    <note>Runner reads SKILL.md files from `/skills` (RO) to build
+    its system prompt at startup.</note>
+  </communication>
+
+  <!-- Runner -> Backend (chunked AG-UI event stream) -->
+
+  <communication id="top.com.runner-to-backend-events"
+                 from="top.runner"
+                 to="top.backend"
+                 via="http"
+                 mode="stream-push"
+                 consistency="eventual"
+                 delivery="at-least-once"
+                 backpressure="buffer"
+                 carries="ifc.ingest-runner-events">
+    <note>Single long-lived chunked POST whose body is a JSONL stream
+    of AG-UI events and runner liveness heartbeats. Reconnect-on-
+    failure with backoff (0.5..10 s) replays the in-flight attempt
+    transcript on the next attempt — over-delivery preferred to silent
+    loss of terminal frames.</note>
+  </communication>
+
+  <!-- Runner -> Postgres (PGMQ inbox consumer: LISTEN + read + ack) -->
+
+  <communication id="top.com.runner-to-postgres-inbox"
+                 from="top.runner"
+                 to="top.postgres"
+                 via="sql"
+                 mode="stream-pull"
+                 consistency="strong"
+                 delivery="at-least-once"
+                 carries="ifc.inbox-consume,ifc.inbox-ack">
+    <note>Single long-lived asyncpg connection per runner. Issues
+    `LISTEN inbox_{slug}` on attach, then alternates
+    `pgmq.read(queue, vt=300, qty=1)` (consume) and `pgmq.delete(
+    queue, msg_id)` (ack-after-process). The `NOTIFY` from the
+    backend's enqueue path wakes the listener immediately; a 30 s
+    fallback poll covers missed notifications across reconnects.
+    `vt=300s` redelivers the message to the next consumer if the
+    current one disconnects before deleting — that is the
+    survives-eviction guarantee. Replaces the prior HTTP long-poll
+    (`top.com.runner-from-backend-inbox`, deleted).</note>
+  </communication>
+
+  <!-- Runner -> Backend (HMAC audit webhooks) -->
+
+  <communication id="top.com.runner-to-backend-webhooks"
+                 from="top.runner"
+                 to="top.backend"
+                 via="http"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="at-most-once"
+                 carries="ifc.runner-webhook">
+    <note>Per-tool-call hook: BeforeToolCall blocks until 200 or the
+    2 s deadline; AfterToolCall and ArtifactRegistered are queued and
+    fired-and-forget. Body signed with HMAC-SHA256 over
+    `f"{ts_ms}.".encode() + body` using the per-runner
+    `runner_secret`.</note>
+  </communication>
+
+  <!-- Runner -> kloc-intelligence MCP -->
+
+  <communication id="top.com.runner-to-kloc-intelligence"
+                 from="top.runner"
+                 to="top.kloc-intelligence-mcp"
+                 via="http"
+                 mode="sync-request-response"
+                 consistency="eventual"
+                 delivery="at-most-once">
+    <note>Streamable-HTTP MCP (2025-03-26 spec). The agent's `Tool`s
+    are dynamically discovered via `list_tools_sync()` against this
+    endpoint; each tool call from the LLM round-trips here. Contract
+    is owned by the external party; not documented in
+    interfaces.xml.</note>
+  </communication>
+
+  <!-- Runner -> LLM provider -->
+
+  <communication id="top.com.runner-to-llm-provider"
+                 from="top.runner"
+                 to="top.llm-provider"
+                 via="http"
+                 mode="stream-push"
+                 consistency="eventual"
+                 delivery="at-most-once">
+    <note>Strands model adapter (`AnthropicModel` /
+    `GeminiModel`) streams completion tokens back to the runner,
+    which translates them into AG-UI `TEXT_MESSAGE_CONTENT` deltas.
+    Provider contract is owned by Anthropic / Google; not documented
+    in interfaces.xml.</note>
+  </communication>
+
+  <!-- ============================================================
+       Environments — `dev` (docker-compose on the operator's host)
+       and `prod` (target, same shape minus the dev conveniences).
+       The runners are NOT listed in `includes`/`excludes`: a Runner
+       container exists only when an active Session needs it; its
+       presence is dynamic, not environment-scoped.
+       =========================== -->
+
+  <environment id="top.env.dev" name="dev">
+    <note>Local docker-compose stack on the operator's machine.
+    All units present. Bridge network `kloc` (explicit name).
+    Backend on host port 8002, frontend on 3000, MinIO API on 9010
+    + console 9011, Postgres on 5432. `top.kloc-intelligence-mcp`
+    is reached via `host.docker.internal:8765`; the operator brings
+    its compose stack up separately.</note>
+  </environment>
+
+  <environment id="top.env.smoke" name="smoke">
+    <note>End-to-end smoke profile (`docker-compose.smoke.yml`).
+    Same shape as dev; used by CI for happy-path checks.</note>
+  </environment>
+
+</spec>

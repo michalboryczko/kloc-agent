@@ -1,0 +1,506 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<spec section="behavior" system="kloc-agent" version="0.1.0" lang-version="1.0.0">
+
+  <!-- ===========================
+       Glossary — ubiquitous language
+       =========================== -->
+
+  <glossary-term id="term.analyst" term="Analyst">
+    <definition>The human researcher who asks natural-language questions about an Indexed Codebase and reads the Assistant's answers.</definition>
+    <aliases>user; researcher; developer</aliases>
+  </glossary-term>
+
+  <glossary-term id="term.session" term="Session">
+    <definition>A persisted conversation thread between one Analyst and the Assistant, identified by a stable id and an Analyst-readable title, holding the full ordered sequence of Messages exchanged in that conversation. A Session is OPEN (accepting new Messages) or CLOSED (frozen, read-only).</definition>
+    <example>Session 7f3a1b2c "audit auth flow" — 24 Messages, last activity 2026-05-17.</example>
+    <aliases>conversation; thread; chat</aliases>
+  </glossary-term>
+
+  <glossary-term id="term.message" term="Message">
+    <definition>A single turn in a Session carrying a role (Analyst, Assistant, Tool, or System), a textual content body, an in-Session sequence number, and an optional list of Tool Call attachments. A Message is finalized once its content has been completely produced.</definition>
+    <aliases>turn; reply; chat-entry</aliases>
+  </glossary-term>
+
+  <glossary-term id="term.assistant" term="Assistant">
+    <definition>The system's AI helper, presented to the Analyst as "kloc analyst". Answers Analyst questions by reasoning, invoking Tools against the Indexed Codebase, and composing a natural-language reply.</definition>
+    <aliases>agent; bot; AI</aliases>
+  </glossary-term>
+
+  <glossary-term id="term.tool" term="Tool">
+    <definition>A discrete capability the Assistant can invoke during a Session: a code-search or code-context function, a file reader, or a delegation to a specialised sub-Assistant. The set of Tools available is fixed at Session start.</definition>
+    <aliases>function; capability; action</aliases>
+  </glossary-term>
+
+  <glossary-term id="term.tool-call" term="Tool Call">
+    <definition>A single Assistant-initiated invocation of a Tool, with a name, arguments, a status (in-progress, executing, or complete), and — once finished — a result body. A Tool Call may instead be denied by policy, in which case its result is a denial reason.</definition>
+  </glossary-term>
+
+  <glossary-term id="term.tool-denial" term="Tool Denial">
+    <definition>A Tool Call whose execution was blocked by the system's policy. The Assistant receives a denial reason in place of a tool result; the Analyst sees the denial visually distinguished from successful Tool Calls.</definition>
+    <aliases>blocked-call; policy-block</aliases>
+  </glossary-term>
+
+  <glossary-term id="term.artifact" term="Artifact">
+    <definition>A named file produced by the Assistant during a Session and attached to the Session so the Analyst can refer back to it later.</definition>
+    <aliases>file; attachment</aliases>
+  </glossary-term>
+
+  <glossary-term id="term.indexed-codebase" term="Indexed Codebase">
+    <definition>The external source code that the system has pre-analysed and over which the Assistant can answer questions. The current deployment is indexed against a single PHP codebase.</definition>
+    <aliases>codebase; repo; sources</aliases>
+  </glossary-term>
+
+  <glossary-term id="term.stream-cursor" term="Stream Cursor">
+    <definition>A per-Session marker identifying the last event the Analyst's view has observed during an in-flight Assistant response. Used to replay missed events after a transient connection loss without duplicating already seen content.</definition>
+    <aliases>resume-cursor; last-event-id</aliases>
+  </glossary-term>
+
+  <!-- ===========================
+       Actors
+       =========================== -->
+
+  <actor id="actor.analyst" kind="human">
+    <description>The Analyst is the only initiator of behavior. They browse and resume Sessions, start new Sessions, ask the Assistant questions, and observe Tool Calls and Artifacts as the Assistant works.</description>
+  </actor>
+
+  <!-- ===========================
+       Use cases
+
+       A use case is pure-domain. It carries no carried-by, realized-by,
+       governed-by, priority, or emits attribute. Lower-level layers
+       (Topology / Interfaces / Composition) reference the use case ID
+       backwards. Shared Behavior elements (events, rules, invariants,
+       NFRs) are bound to a use case via the four child collections.
+       =========================== -->
+
+  <use-case id="beh.browse-sessions" actor="actor.analyst" status="draft">
+    <goal>See the list of prior Sessions in order of most-recent activity so a past conversation can be picked up.</goal>
+    <precondition>The Analyst has visited the system's landing surface.</precondition>
+    <main-flow>
+      <step>System retrieves all of the Analyst's Sessions, most-recently-active first.</step>
+      <step>System presents each Session with its title, Message count, last-activity time, and a short identifier.</step>
+      <step>Analyst reads the list to choose a Session or to decide to start a new one.</step>
+    </main-flow>
+    <alternative-flow name="no-prior-sessions">
+      <step>The Analyst has no prior Sessions.</step>
+      <step>System presents an empty-state indication and a prompt to start a new Session.</step>
+    </alternative-flow>
+    <alternative-flow name="retrieval-failed">
+      <step>The list of Sessions cannot currently be retrieved.</step>
+      <step>System presents an error indication naming the failure cause.</step>
+      <step>The option to start a new Session remains available.</step>
+    </alternative-flow>
+    <postcondition>The Analyst either sees their list of Sessions, an empty-state indication, or a retrieval-failure indication.</postcondition>
+    <acceptance format="gherkin">
+      Given an Analyst with three prior Sessions
+      When they open the landing surface
+      Then they see the three Sessions
+      And the most-recently-updated Session appears first
+      And each Session shows its title, Message count, and last-activity time
+    </acceptance>
+    <acceptance format="gherkin">
+      Given an Analyst with no prior Sessions
+      When they open the landing surface
+      Then they see an empty-state indication
+      And the option to start a new Session is available
+    </acceptance>
+
+    <rules>
+      <rule ref="beh.rule.single-analyst-ownership"/>
+    </rules>
+  </use-case>
+
+  <use-case id="beh.start-new-session" actor="actor.analyst" status="draft">
+    <goal>Begin a fresh conversation with the Assistant about the Indexed Codebase.</goal>
+    <precondition>The Analyst is on the landing surface.</precondition>
+    <main-flow>
+      <step>Analyst requests a new Session.</step>
+      <step>System creates a new OPEN Session and prepares it for the first Message.</step>
+      <step>System presents the conversation surface for the new Session, ready to accept the Analyst's first question.</step>
+    </main-flow>
+    <alternative-flow name="creation-failed">
+      <step>The new Session cannot be created.</step>
+      <step>System remains on the landing surface and presents an error indication.</step>
+    </alternative-flow>
+    <postcondition>An OPEN Session exists belonging to the Analyst, or the landing surface displays a creation-failure indication.</postcondition>
+    <acceptance format="gherkin">
+      Given the Analyst is on the landing surface
+      When they request a new Session
+      Then a new OPEN Session is created
+      And the conversation surface for that Session opens
+      And the conversation has zero prior Messages
+    </acceptance>
+
+    <events>
+      <event ref="evt.session-created"/>
+    </events>
+    <rules>
+      <rule ref="beh.rule.single-analyst-ownership"/>
+    </rules>
+  </use-case>
+
+  <use-case id="beh.resume-session" actor="actor.analyst" status="draft">
+    <goal>Continue a prior conversation from exactly where it left off, with the earlier Messages visible alongside the live conversation.</goal>
+    <precondition>At least one prior Session exists for the Analyst.</precondition>
+    <main-flow>
+      <step>Analyst selects a Session from their list.</step>
+      <step>System retrieves the Session's prior Messages in order.</step>
+      <step>System presents the conversation surface for the selected Session and indicates that prior Messages will appear in the conversation when the next Message is sent.</step>
+    </main-flow>
+    <alternative-flow name="prior-history-too-large">
+      <step>The Session has more prior Messages than can be retrieved in a single page.</step>
+      <step>System presents the most recent page and indicates that older Messages exist.</step>
+    </alternative-flow>
+    <postcondition>The Analyst is positioned on the conversation surface for the chosen Session with its prior history accessible.</postcondition>
+    <acceptance format="gherkin">
+      Given a Session with five prior Messages
+      When the Analyst selects that Session from the list
+      Then the conversation surface for that Session opens
+      And an indication shows that five prior Messages will appear when the next Message is sent
+    </acceptance>
+    <acceptance format="gherkin">
+      Given the Analyst has chosen a Session
+      When the conversation surface opens
+      Then the Analyst can return to the Session list without losing the chosen Session's state
+    </acceptance>
+
+    <events>
+      <event ref="evt.session-resumed"/>
+    </events>
+    <rules>
+      <rule ref="beh.rule.prior-history-shown-on-resume"/>
+      <rule ref="beh.rule.single-analyst-ownership"/>
+    </rules>
+    <invariants>
+      <invariant ref="inv.message-sequence-monotonic"/>
+    </invariants>
+    <nfrs>
+      <nfr ref="nfr.history-page-size"/>
+    </nfrs>
+  </use-case>
+
+  <use-case id="beh.ask-assistant" actor="actor.analyst" status="draft">
+    <goal>Ask a natural-language question about the Indexed Codebase and observe the Assistant's reply as it is produced, including any Tool Calls and Artifacts the Assistant generates.</goal>
+    <precondition>An OPEN Session has been picked or just created.</precondition>
+    <precondition>The Analyst has typed a question into the conversation surface.</precondition>
+    <main-flow>
+      <step>Analyst submits the question.</step>
+      <step>System records the Analyst's Message in the Session before forwarding it to the Assistant.</step>
+      <step>System presents a pending Assistant indicator in the conversation — carrying the Assistant's identity and an active progress affordance — so the Analyst sees that a reply is being prepared before any content has been emitted.</step>
+      <step>System begins streaming the Assistant's reply: textual content appears progressively as it is generated, replacing the pending indicator.</step>
+      <step>For each Tool the Assistant invokes, System presents a Tool Call indicator showing the Tool name, the arguments, and a live status; on completion, the Tool Call's result is attached to that indicator.</step>
+      <step>For each Artifact the Assistant produces, System surfaces it as a named entry visible alongside the conversation.</step>
+      <step>System finalizes the Assistant's Message when its content is complete.</step>
+    </main-flow>
+    <alternative-flow name="tool-denied">
+      <step>A Tool Call requested by the Assistant is blocked by the system's policy.</step>
+      <step>System presents the Tool Call indicator as a Tool Denial, distinguished visually from completed Tool Calls, and shows the denial reason.</step>
+      <step>The Assistant receives the denial reason in place of a tool result and continues its reply.</step>
+    </alternative-flow>
+    <alternative-flow name="session-closed">
+      <step>The Session has been CLOSED.</step>
+      <step>System rejects the submission with a clear "this Session is closed" indication.</step>
+      <step>No Message is appended; no Assistant reply is generated.</step>
+    </alternative-flow>
+    <alternative-flow name="assistant-failed">
+      <step>The Assistant cannot produce a reply due to a system fault.</step>
+      <step>System indicates the failure to the Analyst and preserves the Analyst's already-recorded Message.</step>
+    </alternative-flow>
+    <postcondition>If the reply completed: the Session contains the Analyst's Message and the Assistant's finalized Message in order, along with any Tool Calls and Artifacts produced. If the reply failed: the Analyst's Message is still recorded; the Assistant's Message is absent or marked unfinalized.</postcondition>
+    <acceptance format="gherkin">
+      Given an OPEN Session and a typed question
+      When the Analyst submits the question
+      Then the question is recorded as a Message in the Session
+      And the Assistant's reply text appears progressively
+      And the reply Message is finalized once its content is complete
+    </acceptance>
+    <acceptance format="gherkin">
+      Given an OPEN Session and a typed question
+      When the Analyst submits the question
+      Then a pending Assistant indicator appears in the conversation carrying the Assistant's identity and an active progress affordance
+      And no separate connection-status banner is shown for this waiting state
+      And the pending indicator is replaced once the Assistant's first piece of content (text, Tool Call, or Artifact) arrives
+    </acceptance>
+    <acceptance format="gherkin">
+      Given the Assistant is replying
+      When it invokes a Tool to search the Indexed Codebase
+      Then a Tool Call indicator appears in the conversation
+      And the indicator reflects the Tool's status as it runs
+      And on completion the Tool's result is attached to the indicator
+    </acceptance>
+    <acceptance format="gherkin">
+      Given the Assistant attempts a Tool Call
+      When the system's policy blocks that Tool Call
+      Then a Tool Denial indicator appears in the conversation
+      And the denial reason is visible to the Analyst
+      And the indicator is visually distinct from a successful Tool Call
+    </acceptance>
+    <acceptance format="gherkin">
+      Given the Assistant produces an Artifact during its reply
+      When the Artifact is attached to the Session
+      Then the Analyst sees the Artifact's name surfaced alongside the conversation
+    </acceptance>
+
+    <events>
+      <event ref="evt.message-submitted"/>
+      <event ref="evt.assistant-response-started"/>
+      <event ref="evt.tool-call-started"/>
+      <event ref="evt.tool-call-completed"/>
+      <event ref="evt.tool-call-denied"/>
+      <event ref="evt.artifact-attached"/>
+      <event ref="evt.assistant-response-completed"/>
+    </events>
+    <rules>
+      <rule ref="beh.rule.message-order"/>
+      <rule ref="beh.rule.analyst-message-persisted-first"/>
+      <rule ref="beh.rule.progressive-streaming"/>
+      <rule ref="beh.rule.pending-reply-affordance"/>
+      <rule ref="beh.rule.tool-call-visible"/>
+      <rule ref="beh.rule.tool-denial-distinct"/>
+      <rule ref="beh.rule.closed-session-immutable"/>
+      <rule ref="beh.rule.artifact-surfaced"/>
+      <rule ref="beh.rule.single-analyst-ownership"/>
+    </rules>
+    <invariants>
+      <invariant ref="inv.message-sequence-monotonic"/>
+      <invariant ref="inv.no-assistant-reply-without-prior-message"/>
+      <invariant ref="inv.no-message-after-close"/>
+      <invariant ref="inv.tool-denial-distinguishable"/>
+      <invariant ref="inv.artifact-named"/>
+    </invariants>
+    <nfrs>
+      <nfr ref="nfr.progressive-rendering"/>
+      <nfr ref="nfr.tool-denial-affordance"/>
+    </nfrs>
+  </use-case>
+
+  <use-case id="beh.recover-from-disconnect" actor="actor.analyst" status="draft">
+    <goal>Pick up an in-flight Assistant reply where it left off when a transient connection loss has occurred, without losing any reply content produced while disconnected.</goal>
+    <precondition>The Analyst was observing an Assistant reply in an OPEN Session.</precondition>
+    <precondition>The Analyst's connection to the system was interrupted while the reply was still in progress.</precondition>
+    <main-flow>
+      <step>System retains the Stream Cursor for the last event the Analyst's view observed.</step>
+      <step>When the Analyst reconnects, System replays events produced during the disconnect, from the Stream Cursor onwards.</step>
+      <step>System resumes live streaming once the replay is current.</step>
+    </main-flow>
+    <alternative-flow name="reply-already-completed">
+      <step>The Assistant finished its reply while the Analyst was disconnected.</step>
+      <step>On reconnect, System delivers the remaining events of that reply and then idles, ready for the Analyst's next question.</step>
+    </alternative-flow>
+    <alternative-flow name="recovery-window-exceeded">
+      <step>The Analyst remained disconnected longer than the system retains streaming context.</step>
+      <step>System shows the prior Messages of the Session (including any finalized Assistant Message) and does not replay intermediate streaming events.</step>
+    </alternative-flow>
+    <postcondition>The conversation surface reflects the Session's current state, including all Messages, Tool Calls, and Artifacts produced while the Analyst was disconnected.</postcondition>
+    <acceptance format="gherkin">
+      Given an Analyst is observing an in-flight Assistant reply
+      When the Analyst's connection drops momentarily
+      And the Analyst reconnects within the recovery window
+      Then the events emitted during the disconnect are replayed
+      And live streaming resumes from the current point
+      And no Tool Call or Artifact produced during the disconnect is missing
+    </acceptance>
+    <acceptance format="gherkin">
+      Given the Assistant finishes its reply while the Analyst is disconnected
+      When the Analyst reconnects
+      Then the finalized Assistant Message is visible
+      And the Session is idle and ready for the next question
+    </acceptance>
+
+    <events>
+      <event ref="evt.stream-resumed"/>
+    </events>
+    <rules>
+      <rule ref="beh.rule.resume-replays-cursor"/>
+      <rule ref="beh.rule.pending-reply-affordance"/>
+    </rules>
+    <nfrs>
+      <nfr ref="nfr.disconnect-recovery"/>
+    </nfrs>
+  </use-case>
+
+  <!-- ===========================
+       Domain rules (EARS)
+       =========================== -->
+
+  <rule id="beh.rule.message-order" pattern="ubiquitous" enforces="inv.message-sequence-monotonic">
+    The system shall record every Message in its Session in the order in which it was created, with a per-Session sequence number that strictly increases.
+  </rule>
+
+  <rule id="beh.rule.analyst-message-persisted-first" pattern="event-driven" enforces="inv.no-assistant-reply-without-prior-message">
+    When the Analyst submits a question, the system shall record the Analyst's Message in the Session before requesting the Assistant's reply.
+  </rule>
+
+  <rule id="beh.rule.progressive-streaming" pattern="ubiquitous">
+    The system shall present the Assistant's reply progressively as it is generated; the Analyst shall see partial content before the reply is complete.
+  </rule>
+
+  <rule id="beh.rule.pending-reply-affordance" pattern="state-driven">
+    While the Analyst is awaiting the Assistant's first piece of visible content for the most recently submitted question — that is, after the question has been recorded and before any text, Tool Call, or Artifact has appeared in the conversation — the system shall display a pending Assistant indicator inside the conversation carrying the Assistant's identity ("kloc analyst") and an active progress affordance, and shall not surface a separate connection-status banner for this waiting state. The pending indicator shall be replaced as soon as the Assistant's first piece of visible content arrives.
+  </rule>
+
+  <rule id="beh.rule.tool-call-visible" pattern="event-driven">
+    When the Assistant invokes a Tool, the system shall display a Tool Call indicator carrying the Tool's name, arguments, and live status, and shall attach the Tool's result to that indicator on completion.
+  </rule>
+
+  <rule id="beh.rule.tool-denial-distinct" pattern="event-driven" enforces="inv.tool-denial-distinguishable">
+    When a Tool Call is blocked by policy, the system shall present it as a Tool Denial visually distinct from completed Tool Calls and shall show the denial reason.
+  </rule>
+
+  <rule id="beh.rule.closed-session-immutable" pattern="unwanted-behavior" enforces="inv.no-message-after-close">
+    If a Session has been CLOSED, then the system shall not accept any further Message on that Session.
+  </rule>
+
+  <rule id="beh.rule.resume-replays-cursor" pattern="event-driven">
+    When the Analyst reconnects to an in-flight Assistant reply within the recovery window, the system shall replay every event produced after the Analyst's Stream Cursor before resuming live emission.
+  </rule>
+
+  <rule id="beh.rule.prior-history-shown-on-resume" pattern="state-driven">
+    While the Analyst is on the conversation surface of a Session that has prior Messages, the system shall make those prior Messages accessible to the Analyst.
+  </rule>
+
+  <rule id="beh.rule.artifact-surfaced" pattern="event-driven">
+    When the Assistant attaches an Artifact to a Session, the system shall surface the Artifact's name to the Analyst alongside the conversation.
+  </rule>
+
+  <rule id="beh.rule.single-analyst-ownership" pattern="ubiquitous">
+    The system shall present to the Analyst only the Sessions belonging to that Analyst.
+  </rule>
+
+  <!-- ===========================
+       Invariants
+       =========================== -->
+
+  <invariant id="inv.message-sequence-monotonic" scope="term.session" verifiable-by="assertion">
+    <statement>For any Session, the sequence numbers of its Messages are unique and strictly increasing from the first Message to the most recent.</statement>
+    <rationale>Conversation ordering is foundational; out-of-order Messages corrupt the Analyst's mental model and break any downstream replay.</rationale>
+  </invariant>
+
+  <invariant id="inv.no-assistant-reply-without-prior-message" scope="beh.ask-assistant" verifiable-by="property-test">
+    <statement>For every finalized Assistant Message in a Session, an earlier Analyst Message exists in the same Session.</statement>
+    <rationale>The Assistant only responds to questions; an Assistant Message with no preceding question indicates lost durability of the Analyst's input.</rationale>
+  </invariant>
+
+  <invariant id="inv.no-message-after-close" scope="term.session" verifiable-by="assertion">
+    <statement>No Message exists in any Session whose creation time is later than that Session's closure time.</statement>
+  </invariant>
+
+  <invariant id="inv.tool-denial-distinguishable" scope="beh.ask-assistant" verifiable-by="human-review">
+    <statement>Any Tool Call presented to the Analyst as denied is visually distinguishable from any Tool Call presented as completed, in colour and label.</statement>
+  </invariant>
+
+  <invariant id="inv.artifact-named" scope="term.artifact" verifiable-by="assertion">
+    <statement>Every Artifact surfaced to the Analyst has a human-readable filename.</statement>
+  </invariant>
+
+  <!-- ===========================
+       Domain events
+       =========================== -->
+
+  <event id="evt.session-created" name="SessionCreated" aggregate="Session">
+    <description>A new OPEN Session has been created for the Analyst.</description>
+  </event>
+
+  <event id="evt.session-resumed" name="SessionResumed" aggregate="Session">
+    <description>The Analyst has reopened a prior Session and its history has been retrieved for display.</description>
+  </event>
+
+  <event id="evt.message-submitted" name="MessageSubmitted" aggregate="Message">
+    <description>The Analyst has submitted a question. The Message has been recorded in its Session in advance of any Assistant work.</description>
+  </event>
+
+  <event id="evt.assistant-response-started" name="AssistantResponseStarted" aggregate="Message"
+         triggers="evt.tool-call-started,evt.tool-call-completed,evt.tool-call-denied,evt.artifact-attached,evt.assistant-response-completed">
+    <description>The Assistant has begun composing a reply to the Analyst's most recent Message.</description>
+  </event>
+
+  <event id="evt.tool-call-started" name="ToolCallStarted" aggregate="ToolCall">
+    <description>The Assistant has invoked a Tool; the Analyst sees an in-progress indicator carrying the Tool's name and arguments.</description>
+  </event>
+
+  <event id="evt.tool-call-completed" name="ToolCallCompleted" aggregate="ToolCall">
+    <description>A previously started Tool Call has returned a result; the Analyst's indicator now shows the result.</description>
+  </event>
+
+  <event id="evt.tool-call-denied" name="ToolCallDenied" aggregate="ToolCall">
+    <description>A previously started Tool Call has been blocked by policy; the Analyst's indicator now shows the denial reason in a distinct visual style.</description>
+  </event>
+
+  <event id="evt.artifact-attached" name="ArtifactAttached" aggregate="Artifact">
+    <description>The Assistant has produced an Artifact and attached it to the Session for the Analyst's reference.</description>
+  </event>
+
+  <event id="evt.assistant-response-completed" name="AssistantResponseCompleted" aggregate="Message">
+    <description>The Assistant's reply has been finalized; no further content will be appended to that Message.</description>
+  </event>
+
+  <event id="evt.stream-resumed" name="StreamResumed" aggregate="Session">
+    <description>The Analyst has reconnected after a transient interruption and missed events have been replayed up to the live point.</description>
+  </event>
+
+  <!-- ===========================
+       Non-functional requirements
+       =========================== -->
+
+  <nfr id="nfr.history-page-size" quality="performance" measure="messages-per-resume-request" threshold="500" scope="beh.resume-session">
+    <scenario>
+      <source>Analyst</source>
+      <stimulus>Selects a Session with hundreds of prior Messages</stimulus>
+      <environment>Conversation surface opening for a chosen Session</environment>
+      <artifact>Session history retrieval</artifact>
+      <response>The most recent prior Messages are presented</response>
+      <response-measure>up to 500 Messages are retrieved in a single page</response-measure>
+    </scenario>
+  </nfr>
+
+  <nfr id="nfr.progressive-rendering" quality="usability" measure="time-to-first-visible-token-ms" threshold="1000" scope="beh.ask-assistant">
+    <scenario>
+      <source>Analyst</source>
+      <stimulus>Submits a question to the Assistant</stimulus>
+      <environment>Normal operation; Assistant available</environment>
+      <artifact>Conversation surface</artifact>
+      <response>The first piece of the Assistant's reply becomes visible</response>
+      <response-measure>within 1000 ms at p95 from submission to first visible token</response-measure>
+    </scenario>
+  </nfr>
+
+  <nfr id="nfr.disconnect-recovery" quality="availability" measure="reconnect-replay-success-rate" threshold="99.9" scope="beh.recover-from-disconnect">
+    <scenario>
+      <source>Analyst</source>
+      <stimulus>Reconnects within the recovery window after a transient drop</stimulus>
+      <environment>An in-flight Assistant reply is in progress</environment>
+      <artifact>Conversation surface</artifact>
+      <response>Missed events are replayed; live streaming resumes without loss</response>
+      <response-measure>at least 99.9% of reconnects within the recovery window restore the conversation without missing events</response-measure>
+    </scenario>
+  </nfr>
+
+  <nfr id="nfr.tool-denial-affordance" quality="accessibility" scope="beh.ask-assistant">
+    <scenario>
+      <source>Analyst</source>
+      <stimulus>Observes a Tool Denial in the conversation</stimulus>
+      <environment>Conversation surface, default theme</environment>
+      <artifact>Tool Call indicator</artifact>
+      <response>The Tool Denial is conveyed by both colour and a label, not by colour alone</response>
+      <response-measure>denial state is identifiable by users who cannot distinguish colour differences</response-measure>
+    </scenario>
+  </nfr>
+
+  <nfr id="nfr.document-language" quality="accessibility" scope="system">
+    <scenario>
+      <source>Auditor</source>
+      <stimulus>Inspects the rendered conversation surface</stimulus>
+      <environment>Any deployment</environment>
+      <artifact>Whole page</artifact>
+      <response>The document declares its natural language for assistive technology</response>
+      <response-measure>document language attribute is present and correct</response-measure>
+    </scenario>
+  </nfr>
+
+  <!-- Note: no <trace> elements. The end-to-end spine of each use case is
+       computed from the inverse references already declared in the other
+       sections — operations whose realizes-behavior matches, call-flows whose
+       for-use-case matches, the contract-provider unit each operation lives
+       in, and the carries= attribute on each Topology communication. -->
+
+</spec>

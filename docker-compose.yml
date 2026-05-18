@@ -101,18 +101,10 @@ services:
       RUNNER_WARM_IDLE_S: ${RUNNER_WARM_IDLE_S:-300}
       RUNNER_HEARTBEAT_TIMEOUT_S: ${RUNNER_HEARTBEAT_TIMEOUT_S:-30}
       RUNNER_IMAGE_TAG: ${RUNNER_IMAGE_TAG:-kloc-agent-runner:dev}
-      # Operator pivot: Gemini is the default provider. `LLM_PROVIDER` is
-      # still env-overridable per session deploy.
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
-      # `GEMINI_API_KEY` is the operator's primary key now; the existing
-      # `ANTHROPIC_*` vars stay because the runner-side factory still
-      # supports anthropic when `LLM_PROVIDER=anthropic`.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # B-INFRA-9: forwarded to each per-session runner container by
-      # dev-2's docker_runner.py — empty default keeps compose happy
-      # when the operator hasn't set it on the host; the forwarding
-      # loop filters out empty values.
+
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       BACKEND_URL: http://backend:8000
       KLOC_HOOK_SECRET: ${KLOC_HOOK_SECRET:-dev-secret-please-rotate}
@@ -122,15 +114,8 @@ services:
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-console}
       OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-console}
       OTEL_LOGS_EXPORTER: ${OTEL_LOGS_EXPORTER:-console}
-      # Streamable-HTTP MCP URL the runner uses to reach kloc-intelligence.
-      # kloc-intelligence runs as its own docker-compose stack on the
-      # operator host (Neo4j + Qdrant + `mcp-server-http`); the runner
-      # container reaches it via Docker's host-gateway alias.
       KLOC_MCP_URL: ${KLOC_MCP_URL:-http://host.docker.internal:8765/mcp}
     extra_hosts:
-      # Linux compatibility for the host-gateway alias. Docker Desktop
-      # provides this automatically; the explicit entry is a no-op there
-      # and required on Linux engines.
       - "host.docker.internal:host-gateway"
     ports:
       - "8002:8000"
@@ -140,15 +125,7 @@ services:
       # aiodocker → DockerRunner. The socket bind-mount is mandatory; without
       # it lifespan fails loudly at boot.
       - /var/run/docker.sock:/var/run/docker.sock
-      # B-INFRA-3: named volume so backend writes + runner reads see the
-      # same Docker-managed filesystem. A relative bind-mount would
-      # resolve host-side (compose) vs container-side (aiodocker), so
-      # `/tmp/hydration-<rid>.json` from inside the backend container
-      # wouldn't exist when the runner tries to mount it.
       - kloc-hydration:/tmp/kloc-hydration
-      # Audit point 1: same Docker-managed shared volume for the skills
-      # tree. Read-only inside the backend (seeding happens via the
-      # skills-init service); runners mount the same named volume.
       - kloc-skills:/skills-source:ro
     networks: [kloc]
     healthcheck:
@@ -191,23 +168,12 @@ services:
         condition: service_healthy
 
 networks:
-  # Explicit `name: kloc` so the bridge is independent of compose project
-  # name. aiodocker spawns per-session runner containers onto this exact
-  # network from inside the backend; without a fixed name a project rename
-  # or COMPOSE_PROJECT_NAME override breaks runner→backend reachability.
   kloc:
     name: kloc
 
 volumes:
   postgres-data:
   minio-data:
-  # B-INFRA-5: force explicit names so docker-compose does NOT prefix
-  # with the project name. Backend container mounts these via compose
-  # (which would prefix to `kloc-agent_kloc-hydration` etc); per-session
-  # runner containers are spawned by aiodocker and pass the bare
-  # `kloc-hydration` / `kloc-skills` names. Without the explicit `name:`
-  # override the two resolve to different Docker volumes and the runner
-  # reads an empty volume (FileNotFoundError on /run/kloc/<rid>.json).
   kloc-hydration:
     name: kloc-hydration
   kloc-skills:

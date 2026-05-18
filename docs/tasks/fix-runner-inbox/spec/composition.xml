@@ -1,0 +1,921 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<spec section="composition" system="kloc-agent" version="0.1.0" lang-version="1.0.0">
+
+  <!-- ============================================================
+       Composition is organised per internal unit:
+         * `top.backend` — components under `src/`
+         * `top.frontend` and `top.frontend-bff` — components under
+           `frontend/src/`
+         * `top.runner` — components under `runner/`
+
+       The non-application units (`top.postgres`, `top.minio`,
+       `top.hydration-volume`, `top.skills-volume`) are not
+       Composition-modelled: they have no kloc-agent-owned source
+       tree of their own.
+
+       Constraint scope comes entirely from the components that
+       reference each `<constraint>` via `<constraints>`; constraints
+       themselves declare no `in-unit`, no `zone`.
+       =========================== -->
+
+
+  <!-- ============================================================
+       BACKEND (top.backend) — `src/`
+
+       Layering: api (HTTP entrypoints) → streaming + repos +
+       runner_mgmt + storage + hooks_audit (services) → db (ORM +
+       async session). main + settings wire everything together at
+       process start.
+       =========================== -->
+
+  <component id="cmp.backend.api" zone="src/api/" in-unit="top.backend">
+    <intent>HTTP entrypoints for every Backend contract surface:
+    public REST (sessions, messages, artifacts, cancel, close), public
+    SSE (open / resume run streams), internal runner ingress (chunked
+    NDJSON events, long-poll inbox), HMAC-authenticated webhooks, and
+    ops health probes. Owns request parsing, dependency injection
+    boilerplate, HTTP status mapping, and CORS. Owns no business
+    rule of its own.</intent>
+    <structure>
+      One module per contract family, each contributing one
+      `APIRouter` mounted from `src/main.py`:
+      - sessions.py — public REST for Session lifecycle
+      - stream.py — public SSE (POST + GET)
+      - internal.py — backend←runner JSONL ingress (outbound only;
+        the prior long-poll inbox endpoint
+        `GET /internal/sessions/{id}/inbox` is gone — backend→runner
+        traffic now flows over PGMQ)
+      - webhooks.py — HMAC-verified runner webhook receiver
+      - artifacts.py — presigned redirect for artifact bytes
+      - stop.py — cancel-run forwarder
+      - health.py — healthz / readyz
+      Pydantic request/response models live alongside each router.
+    </structure>
+    <logic>
+      <rule>Validate path / body / query before any repo or registry call.</rule>
+      <rule>For state-changing endpoints, commit the DB transaction before returning the response so the caller's read-your-writes view holds.</rule>
+      <rule>For `POST /v1/sessions/{id}/messages` the user Message is appended and committed before the response is returned, so the caller can immediately open the stream and the runner sees the message in `prior_messages`.</rule>
+      <rule>For `POST /v1/sessions/{id}/stream` register the SSE subscriber on the EventBus BEFORE invoking the messaging producer (`cmp.backend.messaging.send_user_message`) so a warm runner's first frame is not dropped.</rule>
+      <rule>For `POST /v1/sessions/{id}/stream` the user-message enqueue is delegated to `cmp.backend.messaging`; the API module never calls `pgmq.*` or `NOTIFY` directly, never holds an `asyncio.Queue` of pending user messages, and never references `RegistryEntry.inbox` (which no longer exists).</rule>
+      <rule>For `POST /v1/webhooks/...` resolve the per-runner HMAC secret BEFORE running HMAC verification; reject with 401 if the registry has no entry and fallback is not allowed, never test the bootstrap secret against an unknown `runner_id`.</rule>
+      <rule>For artifact registration, audit row + ON CONFLICT INSERT + policy decision commit in the same transaction.</rule>
+    </logic>
+    <requires ref="cmp.backend.streaming"/>
+    <requires ref="cmp.backend.runner-mgmt"/>
+    <requires ref="cmp.backend.messaging"/>
+    <requires ref="cmp.backend.repos"/>
+    <requires ref="cmp.backend.hooks-audit"/>
+    <requires ref="cmp.backend.storage"/>
+    <requires ref="cmp.backend.db"/>
+    <requires ref="cmp.backend.settings"/>
+    <constraints>
+      <constraint ref="con.api-no-direct-orm-query"/>
+      <constraint ref="con.api-no-business-rules"/>
+      <constraint ref="con.commit-before-return"/>
+      <constraint ref="con.api-no-direct-pgmq"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.messaging" zone="src/messaging/" in-unit="top.backend">
+    <intent>PGMQ-backed transport for backend-to-runner user
+    messages. Owns the extension bootstrap, the per-Session queue
+    lifecycle, and the producer-side `pgmq.send` + `NOTIFY` pairing
+    that wakes the runner's `LISTEN` immediately. Queue identity is
+    a pure function of `session_id` so it survives any
+    `RegistryEntry` swap (warm-idle eviction, crash respawn,
+    spawn-lock retry), structurally eliminating the
+    queue-identity-drift class of bug documented in
+    `tasks/fix-runner-inbox/root-cause.md`. Holds no `asyncio.Queue`
+    of its own; the only stateful element here is the Postgres
+    queue itself.</intent>
+    <structure>
+      - pgmq.py — `ensure_extension(conn)` (CREATE EXTENSION IF NOT
+        EXISTS pgmq), `inbox_queue_name(session_id) -> str`
+        (`inbox_{session_id_no_dashes}`),
+        `ensure_inbox_queue(conn, session_id)` (idempotent
+        `pgmq.create_queue`), `send_user_message(conn, session_id,
+        run_id, messages) -> msg_id` (pgmq.send + NOTIFY in one tx),
+        `drop_inbox_queue(conn, session_id)` (called from
+        Session.close).
+    </structure>
+    <logic>
+      <rule>Every `send_user_message` issues `pgmq.send` and `NOTIFY inbox_{slug}` in the same DB transaction so the LISTEN-ing runner cannot wake before the row is visible.</rule>
+      <rule>Queue identity is derived solely from `session_id` (`inbox_queue_name`); the function never reads any field of `RegistryEntry` or any other per-spawn object.</rule>
+      <rule>`ensure_inbox_queue` is idempotent — a second call with the same `session_id` is a no-op so producer-side callers never race on first-message creation.</rule>
+      <rule>`drop_inbox_queue` is called only from the Session-close path, never from runner eviction; pending messages must survive eviction.</rule>
+    </logic>
+    <requires ref="cmp.backend.db"/>
+    <constraints>
+      <constraint ref="con.messaging-send-notify-same-tx"/>
+      <constraint ref="con.inbox-queue-name-from-session-id"/>
+      <constraint ref="con.messaging-no-asyncio-queue"/>
+      <constraint ref="con.drop-queue-only-on-session-close"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.streaming" zone="src/streaming/" in-unit="top.backend">
+    <intent>In-process pub/sub fabric that decouples AG-UI event
+    producers (the JSONL ingress in `cmp.backend.api`) from consumers
+    (the SSE generators in `cmp.backend.api` and the durable
+    persister coroutine), plus a bounded replay ring so reconnecting
+    Analysts can pick up from a cursor. Also owns the SSE encoder and
+    the assistant-message text-delta debouncer.</intent>
+    <structure>
+      - event_bus.py — `EventBus` with `(session_id, run_id)` topics,
+        register-before-publish API, essential vs bounded queues,
+        slow-subscriber sentinel.
+      - execution_registry.py — bounded deque (maxlen 10_000) per
+        execution with monotonic `seq` + `replay_from(last_seq)`;
+        evicts 5 min after terminal frame.
+      - sse.py — `make_response` wraps an async iterator in a
+        `StreamingResponse` and uses AG-UI's `EventEncoder`; stamps
+        `id: <seq>` on each line.
+      - agui_event_formatter.py — `normalize(event)` coerces Pydantic
+        or dict to wire form; `is_run_lifecycle_terminal` for stream
+        teardown.
+      - debounce.py — `TextDeltaDebouncer` flushes a per-message
+        buffer on 256 bytes or 250 ms to bound persister write QPS.
+    </structure>
+    <logic>
+      <rule>The persister registers with `essential=True` (unbounded queue) because dropping it would leave the DB with a prefix of the run.</rule>
+      <rule>SSE subscribers register with the default bounded queue; the slow-subscriber sentinel evicts them rather than OOMing the backend.</rule>
+      <rule>Seq is allocated exactly once per frame at the JSONL ingress boundary — `ExecutionRegistry.append` is the single source of seq truth so SSE and persister see the same number and reconnect cursors stay consistent.</rule>
+    </logic>
+    <constraints>
+      <constraint ref="con.streaming-no-direct-db"/>
+      <constraint ref="con.streaming-bounded-rings"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.runner-mgmt" zone="src/runner_mgmt/" in-unit="top.backend">
+    <intent>Per-Session runner lifecycle: spawn, heartbeat watch, warm
+    idle, orphan sweep at boot, and inbox queue per Session.
+    `DockerRunner` is the only concrete `Runner` impl and is the unit
+    that talks to the Docker daemon. The registry is in-memory and
+    process-local — single uvicorn worker.</intent>
+    <structure>
+      - protocol.py — `Runner` and `RunnerHandle` Protocols (spawn,
+        terminate, is_alive).
+      - docker_runner.py — `DockerRunner` + `DockerRunnerHandle`:
+        create / start / stop(t=5) / wait / delete via aiodocker.
+        Memory 1 GiB, 2 NanoCPUs, pids-limit 256, labelled
+        `kloc.role=runner`.
+      - registry.py — `RunnerRegistry` with per-session
+        `RegistryEntry{handle, warm_idle, heartbeat, inbox, ...}`,
+        per-session spawn lock, in-flight tool-call tracking.
+      - heartbeat.py — `HeartbeatWatcher` per-Session task; on
+        timeout: terminate handle and fire on_crash callback.
+      - warm_idle.py — `WarmIdleManager` cancels on user-message and
+        evicts after the configured idle window.
+      - sweeper.py — `orphan_sweep` at boot: kill any
+        `kloc.role=runner` container the registry doesn't know.
+      - hydrate.py — writes per-spawn `<runner_id>.json` into the
+        hydration named volume and builds the aiodocker Mount dicts.
+    </structure>
+    <logic>
+      <rule>Spawn under the per-session lock so two concurrent stream calls cannot race two containers onto the same Session.</rule>
+      <rule>Heartbeat reset is driven only by `type: "heartbeat"` / `RunnerHeartbeat` frames on the JSONL ingress; AG-UI events do not reset the watcher.</rule>
+      <rule>On `RUN_FINISHED` start the warm-idle countdown; on the next user-message cancel it.</rule>
+      <rule>Boot orphan-sweep runs ONCE after the registry is wired and the registry is empty — every labelled container found is an orphan to terminate.</rule>
+      <rule>The hydration file is written before container `create` and is named with the spawn's `runner_id` so concurrent spawns cannot collide on a shared file name.</rule>
+    </logic>
+    <requires ref="cmp.backend.streaming"/>
+    <constraints>
+      <constraint ref="con.runner-mgmt-aiodocker-only"/>
+      <constraint ref="con.spawn-under-lock"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.repos" zone="src/repos/" in-unit="top.backend">
+    <intent>Thin async repositories that own all SQL the backend
+    executes against `top.postgres`. One repo per aggregate plus the
+    boot recovery sweep. Every method takes an `AsyncSession`
+    injected by the caller — no module-level session, no implicit
+    connection.</intent>
+    <structure>
+      - sessions.py — `SessionRepo` (create, get, close,
+        touch_updated_at, set_runner_state, list_for_analyst).
+      - messages.py — `MessageRepo` (`_next_seq` + `append` with
+        savepoint+UNIQUE retry, `append_delta` server-side concat,
+        `finalize`, `get`, `list_for_session`).
+      - audit.py — `AuditRepo` (`append` validating against the
+        locked 12-name vocabulary, `last_state_snapshot` via JSONB
+        `@>` predicate, `list_for_session`).
+      - artifacts.py — `ArtifactRepo.register` is
+        `INSERT … ON CONFLICT (session_id, object_key) DO NOTHING
+        RETURNING …` so duplicate webhooks from runner retries are
+        absorbed without divergence.
+      - boot.py — `sweep_orphaned_messages(conn)`: any Message with
+        `finalized_at IS NULL` is finalized and a `stream_orphaned`
+        audit row inserted.
+    </structure>
+    <logic>
+      <rule>Sequence allocation for Messages is `SELECT max(seq)+1` inside the same transaction as the INSERT, with the per-Session UNIQUE constraint as the atomic guarantee and a bounded retry on IntegrityError.</rule>
+      <rule>`AuditRepo.append` rejects any event_type not in the locked vocabulary so undocumented audit names cannot leak into the table.</rule>
+      <rule>`ArtifactRepo.register` is idempotent on `(session_id, object_key)` and returns `(row, created)` so the caller can audit every receive regardless of duplicate.</rule>
+    </logic>
+    <requires ref="cmp.backend.db"/>
+    <constraints>
+      <constraint ref="con.repo-async-session-injected"/>
+      <constraint ref="con.repo-no-http"/>
+      <constraint ref="con.repo-audit-vocabulary-locked"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.db" zone="src/db/" in-unit="top.backend">
+    <intent>SQLAlchemy 2.x async setup: the declarative base with
+    stable alembic naming conventions, the async engine factory and
+    sessionmaker, the FastAPI dependency that yields one
+    `AsyncSession` per request, and the ORM table mappings plus the
+    Pydantic `HydrationPayload` schema used to bind-mount runner
+    bootstrap state.</intent>
+    <structure>
+      - base.py — `Base(DeclarativeBase, AsyncAttrs)` + `MetaData`
+        with NAMING_CONVENTION.
+      - engine.py — `create_async_engine` (pool 10, max-overflow 20,
+        pre-ping) + `async_sessionmaker(expire_on_commit=False)` +
+        module-level `get_engine` / `get_sessionmaker` accessors.
+      - deps.py — `get_session` request-scoped generator.
+      - models.py — `Session`, `Message`, `AuditLog`,
+        `ArtifactMetadata` ORM tables + `HydrationPayload`,
+        `McpStdioEndpoint`, `McpHttpEndpoint` Pydantic models +
+        `AuditEventType` Literal of the 12 locked audit names.
+    </structure>
+    <constraints>
+      <constraint ref="con.db-no-http"/>
+      <constraint ref="con.audit-vocab-single-source"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.hooks-audit" zone="src/hooks_audit/" in-unit="top.backend">
+    <intent>Webhook utilities: HMAC verification, policy decision,
+    and an out-of-band audit-emit closure used by long-running
+    coroutines (RunnerRegistry, WarmIdleManager, HeartbeatWatcher)
+    that don't share the request-scoped session.</intent>
+    <structure>
+      - verify_hmac.py — `verify_hmac_signature` (HMAC-SHA256 over
+        `f"{ts}.{body}"`, base64, 60 s replay window, constant-time
+        compare); `sign_for_test` for tests.
+      - policy.py — `Policy.decide` (allow-all unless
+        `event=BeforeToolCall AND tool_name in deny_tools_set`).
+      - emit.py — `make_audit_emit_closure(sessionmaker)` returns an
+        async `emit(event_type, payload)` that opens a fresh
+        AsyncSession, writes one audit row, commits.
+    </structure>
+    <requires ref="cmp.backend.repos"/>
+    <requires ref="cmp.backend.db"/>
+    <constraints>
+      <constraint ref="con.hmac-constant-time"/>
+      <constraint ref="con.audit-emit-fresh-session"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.storage" zone="src/storage/" in-unit="top.backend">
+    <intent>Async S3 helpers — upload_bytes, presigned_get, and the
+    canonical artifact object-key shape. Backend does not upload
+    artifact bodies in production — that's the runner — but the
+    helper exists for tests and small server-side writes.</intent>
+    <structure>
+      - s3.py — `upload_bytes`, `presigned_get(expires_in=900)`,
+        `artifact_object_key(session_id, artifact_id, filename)`.
+    </structure>
+    <constraints>
+      <constraint ref="con.storage-no-orm"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.settings" zone="src/settings.py" in-unit="top.backend">
+    <intent>Single typed `Settings(BaseSettings)` reading `.env` and
+    the process environment. Pydantic validators enforce the
+    LLM-provider key invariant at construction time so misconfig
+    surfaces at boot, not inside the runner.</intent>
+    <structure>
+      One Pydantic settings class; `get_settings()` is `@lru_cache`
+      so all callers see the same instance.
+    </structure>
+    <constraints>
+      <constraint ref="con.settings-no-runtime-env-reads"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.main" zone="src/main.py" in-unit="top.backend">
+    <intent>Process composition root: the `lifespan` context that
+    boots the engine, the S3 client, the RunnerRegistry +
+    DockerRunner, runs the boot-time orphan sweeps, and registers
+    every `APIRouter`. CORS middleware is installed BEFORE any
+    router so preflight is handled by Starlette, not falling through
+    to a 405.</intent>
+    <structure>
+      One `create_app()` plus the module-level `app = create_app()`.
+      All injection wiring (engine, sessionmaker, S3 client,
+      RunnerRegistry, audit-emit closure, EventBus singleton) is on
+      `app.state` so downstream `Depends` can read it.
+    </structure>
+    <requires ref="cmp.backend.api"/>
+    <requires ref="cmp.backend.runner-mgmt"/>
+    <requires ref="cmp.backend.streaming"/>
+    <requires ref="cmp.backend.repos"/>
+    <requires ref="cmp.backend.db"/>
+    <requires ref="cmp.backend.storage"/>
+    <requires ref="cmp.backend.hooks-audit"/>
+    <requires ref="cmp.backend.settings"/>
+    <constraints>
+      <constraint ref="con.cors-before-routers"/>
+      <constraint ref="con.lifespan-boot-order"/>
+    </constraints>
+  </component>
+
+
+  <!-- ============================================================
+       FRONTEND (top.frontend) — `frontend/src/`
+
+       Two units share this tree: `top.frontend` (SSR + client
+       components rendered by Next.js) and `top.frontend-bff`
+       (the `/api/agent-proxy*` route handlers). Each module's
+       `in-unit` reflects who owns it at runtime.
+       =========================== -->
+
+  <component id="cmp.frontend.app-shell"
+             zone="frontend/src/app/"
+             in-unit="top.frontend">
+    <intent>Next.js app-router shell: the root layout, the landing
+    page, and the conversation page. The conversation page is a
+    server component that hydrates from the backend via `Promise.all`
+    before passing data to the client conversation root.</intent>
+    <structure>
+      - layout.tsx — root layout, theme bootstrap inlined to prevent
+        FOUC, fonts.
+      - page.tsx — landing page; renders Shell + Sidebar + hero copy;
+        does NOT fetch sessions server-side (Sidebar fetches itself
+        on mount).
+      - s/[sessionId]/page.tsx — async server component;
+        `Promise.all([getSession, listMessages(limit=500)])`; on
+        ApiError 404 → notFound().
+      - s/[sessionId]/ConversationClient.tsx — `"use client"`
+        boundary that renders `<Conversation>` with the SSR-hydrated
+        props.
+    </structure>
+    <logic>
+      <rule>Server-side fetches happen only on the conversation page; the landing page is fully client-driven.</rule>
+      <rule>SSR rendering must not open the SSE stream; the stream is opened by `useRunLoop` only when the Analyst submits a message.</rule>
+    </logic>
+    <requires ref="cmp.frontend.api-client"/>
+    <requires ref="cmp.frontend.components"/>
+  </component>
+
+  <component id="cmp.frontend.bff-proxy"
+             zone="frontend/src/app/api/agent-proxy/"
+             in-unit="top.frontend-bff">
+    <intent>Same-origin SSE pass-through Route Handlers. Each
+    handler validates the request, opens an upstream connection to
+    `top.backend`, and pipes the upstream body straight back to the
+    browser unchanged. No transformation, no inspection of the SSE
+    payload, no buffering beyond what `fetch` already does.</intent>
+    <structure>
+      - route.ts — `POST /api/agent-proxy` forwards to `POST
+        /v1/sessions/{thread_id}/stream`.
+      - resume/route.ts — `GET /api/agent-proxy/resume` forwards to
+        `GET /v1/sessions/{session_id}/stream?run_id=&last_event_id=`.
+      Both set `runtime = "nodejs"` and
+      `dynamic = "force-dynamic"` so Next.js does not try to cache
+      or pre-render them.
+    </structure>
+    <logic>
+      <rule>Validate `thread_id` (POST) or `session_id`+`run_id` (GET) before opening the upstream connection.</rule>
+      <rule>Preserve upstream status code; set Cache-Control: no-cache, no-transform; Connection: keep-alive on the response.</rule>
+    </logic>
+    <constraints>
+      <constraint ref="con.bff-no-payload-mutation"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.frontend.api-client"
+             zone="frontend/src/lib/"
+             in-unit="top.frontend">
+    <intent>Typed HTTP client for the backend's public REST surface
+    plus the AG-UI SSE consumer, the in-memory state reducer, and
+    the `useRunLoop` hook that owns the stream lifecycle and
+    reconnect logic. The client is the only place network requests
+    are issued — components never call `fetch` directly.</intent>
+    <structure>
+      - api.ts — `listSessions`, `createSession`, `getSession`,
+        `listMessages`, `closeSession`, `cancelRun`,
+        `artifactDownloadUrl`; `ApiError`.
+      - agui.ts — `openRunStream` (POSTs `/api/agent-proxy`) and
+        `resumeRunStream` (GETs `/api/agent-proxy/resume`); SSE
+        parser yielding `AGUIEvent`s.
+      - reducer.ts — pure `applyAction(state, action)` covering
+        every AG-UI event the runner emits plus optimistic /
+        rollback / connection actions.
+      - runLoop.ts — `useRunLoop` hook: opens the stream on submit,
+        rolls back optimistic state on error, schedules
+        exponential-backoff reconnects on disconnect, falls back to
+        `listMessages` when the stream recovery window is exceeded.
+      - types.ts — all wire shapes the frontend cares about:
+        backend payloads + AG-UI events + view types.
+      - theme.ts, time.ts, cn.ts — pure helpers, no I/O.
+    </structure>
+    <logic>
+      <rule>The browser uses `NEXT_PUBLIC_BACKEND_URL`; the server uses `BACKEND_URL` — same module, branch on `typeof window`.</rule>
+      <rule>Every backend call goes through `jsonOrThrow` so non-2xx surfaces as `ApiError` with status + parsed body.</rule>
+      <rule>Streaming traffic goes through the BFF — never direct from the browser to `top.backend` — so the browser stays same-origin.</rule>
+    </logic>
+    <constraints>
+      <constraint ref="con.frontend-fetch-only-in-api-client"/>
+      <constraint ref="con.streaming-via-bff"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.frontend.components"
+             zone="frontend/src/components/"
+             in-unit="top.frontend">
+    <intent>Presentational React components for the conversation
+    surface (Shell, Sidebar, Thread, AnalystBubble, AssistantBubble,
+    PendingAssistantBubble, ToolCallCard, ArtifactChip,
+    ConnectionBanner, ErrorBanner, EmptyState, InputBar,
+    NewSessionButton, SessionListItem, ConversationHeader,
+    ThemeToggle, BlinkingCaret, RailFooter, CodeChip). Each
+    component reads view-model state and dispatches actions; none
+    issues HTTP requests of its own.</intent>
+    <structure>
+      One `.tsx` file per component. Pure visual concerns — colors,
+      layout, accessibility affordances. Stateful behaviour delegated
+      to `useRunLoop` and the reducer.
+    </structure>
+    <logic>
+      <rule>The pending Assistant indicator is shown inside the conversation thread (carrying the Assistant's identity), not as a separate connection-status banner.</rule>
+      <rule>The Tool Denial style is visually distinct from a completed Tool Call in both colour AND label.</rule>
+    </logic>
+    <requires ref="cmp.frontend.api-client"/>
+    <constraints>
+      <constraint ref="con.component-no-direct-fetch"/>
+      <constraint ref="con.tool-denial-visually-distinct"/>
+    </constraints>
+  </component>
+
+
+  <!-- ============================================================
+       RUNNER (top.runner) — `runner/`
+       =========================== -->
+
+  <component id="cmp.runner.entrypoint"
+             zone="runner/"
+             in-unit="top.runner">
+    <intent>Container entrypoint: read the HydrationPayload, build
+    the channel, the audit-hook sender, the MCP clients, the Strands
+    agent, the AG-UI wrapper, then enter the long-poll inbox loop.
+    Each inbound user-message triggers one `agui_agent.run(...)`
+    pass; every yielded AG-UI event is forwarded via
+    `channel.emit`.</intent>
+    <structure>
+      - __main__.py — `_run` lifecycle, `_run_one_turn` per inbound,
+        first-turn-only merge of `prior_messages` with the inbound
+        list to avoid duplication.
+      - agent_factory.py — `build_agent` (Strands `Agent` with MCP
+        tools + a `summarizer` sub-Agent + optional `file_read`),
+        `_AuditHookProvider` that registers BeforeToolCallEvent /
+        AfterToolCallEvent callbacks on the per-thread inner agent
+        the AG-UI wrapper constructs.
+      - model_factory.py — provider switch on
+        `payload.llm_provider` (anthropic / gemini wired,
+        openrouter / bedrock raise NotImplementedError).
+      - mcp_clients.py — builds Strands `MCPClient`s from mixed
+        `McpStdioEndpoint` / `McpHttpEndpoint` lists; HTTP path
+        adapts the 3-tuple Streamable-HTTP client to the 2-tuple
+        Strands expects.
+    </structure>
+    <logic>
+      <rule>The MCP `with` scope wraps the whole inbox loop — a client subprocess death is equivalent to a runner exit.</rule>
+      <rule>On the FIRST turn merge `prior_messages` with the inbound `messages`; on subsequent turns use the inbound list as-is (the backend already pushes the cumulative list).</rule>
+      <rule>On an exception inside `agui_agent.run` emit a synthetic `RUN_ERROR` frame with `cause: "runner_crashed"` so the backend's SSE consumers close cleanly and the warm-idle watcher fires.</rule>
+      <rule>The audit hooks must be registered via `StrandsAgent(hooks=[provider])` (not on the seed `Agent`) — the wrapper builds a fresh per-thread inner agent that does not inherit seed-agent hooks.</rule>
+    </logic>
+    <requires ref="cmp.runner.channel"/>
+    <requires ref="cmp.runner.hooks"/>
+    <constraints>
+      <constraint ref="con.runner-mcp-scope-wraps-loop"/>
+      <constraint ref="con.runner-first-turn-merge"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.runner.channel"
+             zone="runner/channel.py"
+             in-unit="top.runner">
+    <intent>The single conduit to `top.backend`: outbound chunked
+    NDJSON event stream, long-poll inbox iterator, and a 15 s
+    heartbeat. Replays the in-flight attempt's frames on reconnect
+    so terminal frames (RUN_FINISHED / RUN_ERROR) cannot be lost
+    silently to a TCP drop.</intent>
+    <structure>
+      `BackendChannel` class with three async loops:
+      `_stream_outbound` (single chunked POST whose body is a
+      long-lived generator), `iter_inbound` (25 s GET long-poll),
+      `_heartbeat_loop` (15 s `set_busy`-aware ping). Outbound queue
+      bounded at 1024 with a sentinel for clean shutdown.
+    </structure>
+    <logic>
+      <rule>Over-delivery is preferred to silent loss — on any transport failure prepend the whole attempt's frames to the cross-attempt buffer before draining the queue, so the next attempt's body iterator replays them in order.</rule>
+      <rule>The inbox loop swallows `httpx.TimeoutException` and re-polls; other exceptions back off 1 s and continue, never propagate to the entrypoint.</rule>
+      <rule>The `shutdown` inbox frame ends `iter_inbound`; the entrypoint then exits the inbox loop and stops the channel cleanly.</rule>
+    </logic>
+    <constraints>
+      <constraint ref="con.channel-replay-on-failure"/>
+      <constraint ref="con.channel-no-direct-llm-call"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.runner.hooks"
+             zone="runner/hooks/"
+             in-unit="top.runner">
+    <intent>Strands hook callbacks that POST audit webhooks to the
+    backend and translate backend responses into Strands cancellation
+    semantics. Owns the HMAC signing, the 2 s BeforeToolCall
+    deadline, the fire-and-forget AfterToolCall queue, and the
+    `ArtifactRegistered` path that also emits the AG-UI
+    `ArtifactAttached` Custom event.</intent>
+    <structure>
+      - audit.py — `AuditHookSender.before_tool_call` (blocks ≤ 2 s,
+        translates timeout/error/deny into `cancel_tool` plus a
+        `CUSTOM ToolCallDenied` event); `after_tool_call`
+        (fire-and-forget through a 256-slot queue, emits a
+        `HookBackpressure` once on QueueFull); `register_artifact`
+        (POSTs `ArtifactRegistered` then emits `ArtifactAttached`).
+      - utils.py — `resolve_tool_call` unwraps the
+        `skill_executor` wrapper so audit names surface the real
+        underlying tool.
+    </structure>
+    <logic>
+      <rule>BeforeToolCall blocks until the backend responds OR the 2 s deadline; on timeout set `cancel_tool="policy_deadline_exceeded"` AND emit a `HookBackpressure` AND emit a `ToolCallDenied` for that toolCallId.</rule>
+      <rule>AfterToolCall is fire-and-forget through a bounded queue; on overflow emit `HookBackpressure` once but never drop BeforeToolCall.</rule>
+      <rule>`ArtifactRegistered` is HMAC-POSTed BEFORE the AG-UI `ArtifactAttached` custom event so the FE never renders a chip whose artifact_id has not yet reached the DB.</rule>
+      <rule>Stop drains the AfterToolCall queue under exclusive ownership AFTER cancelling the worker, so each in-flight POST is bounded by the per-request httpx timeout.</rule>
+    </logic>
+    <requires ref="cmp.runner.channel"/>
+    <constraints>
+      <constraint ref="con.hook-deadline-bounded"/>
+      <constraint ref="con.hook-after-fire-and-forget"/>
+    </constraints>
+  </component>
+
+
+  <!-- ============================================================
+       CONSTRAINTS — typed reusable rules.
+       Scope = the components that reference them.
+       =========================== -->
+
+  <!-- API layering -->
+
+  <constraint id="con.api-no-direct-orm-query" type="rule">
+    <intent>API handlers reach the database only through a `*Repo`
+    class; raw `select(...)`/`update(...)` calls are forbidden in
+    `src/api/`.</intent>
+    <rationale>Repositories are the single audit point for SQL
+    invariants (sequence allocation, audit vocabulary check, ON
+    CONFLICT semantics). Bypassing them in a route handler silently
+    re-introduces ordering and idempotency bugs.</rationale>
+    <forbid construct="api-direct-sqlalchemy-execute"/>
+    <forbid construct="api-direct-select-statement"/>
+  </constraint>
+
+  <constraint id="con.api-no-business-rules" type="rule">
+    <intent>API modules contain only request validation, DI, and
+    HTTP status mapping. Business rules belong in domain code
+    (repos / streaming / runner_mgmt).</intent>
+    <forbid construct="business-rule-in-api-handler"/>
+  </constraint>
+
+  <constraint id="con.commit-before-return" type="rule">
+    <intent>State-changing endpoints commit the DB transaction
+    before returning the response so the caller's read-your-writes
+    view holds.</intent>
+    <require>Every state-changing handler issues `await db.commit()` before its `return`.</require>
+  </constraint>
+
+  <!-- Streaming -->
+
+  <constraint id="con.streaming-no-direct-db" type="rule">
+    <intent>`src/streaming/` modules do not import from `src/db/`
+    or `src/repos/`. The persister coroutine in `cmp.backend.api`
+    is the boundary between the event bus and the DB.</intent>
+    <forbid construct="streaming-import-of-repos"/>
+    <forbid construct="streaming-import-of-db-models"/>
+  </constraint>
+
+  <constraint id="con.streaming-bounded-rings" type="pattern">
+    <intent>Every per-execution buffer in `src/streaming/` is
+    bounded: the EventBus subscriber queue is bounded by default,
+    the ExecutionRegistry ring is a `deque(maxlen=10_000)`.</intent>
+    <require>Subscriber queues are bounded unless `essential=True` is documented at the call site.</require>
+    <require>ExecutionRegistry rings are bounded `deque` with a `maxlen`.</require>
+    <forbid construct="unbounded-asyncio-queue-without-essential-flag"/>
+  </constraint>
+
+  <!-- runner_mgmt -->
+
+  <constraint id="con.runner-mgmt-aiodocker-only" type="rule">
+    <intent>The only Docker client allowed in `src/runner_mgmt/` is
+    `aiodocker`. No subprocess shelling out to `docker`, no
+    docker-py.</intent>
+    <forbid construct="subprocess-invoking-docker-cli"/>
+    <forbid construct="import-of-docker-py"/>
+  </constraint>
+
+  <constraint id="con.spawn-under-lock" type="rule">
+    <intent>`RunnerRegistry.get_or_spawn` acquires the per-Session
+    spawn lock before any spawn-side effect (hydration write,
+    container create).</intent>
+    <require>All spawn-side-effects live inside an `async with self._spawn_locks[session_id]:` block.</require>
+  </constraint>
+
+  <!-- repos -->
+
+  <constraint id="con.repo-async-session-injected" type="pattern">
+    <intent>Every repository takes an `AsyncSession` by constructor
+    or method argument; none constructs one internally.</intent>
+    <require>Each `*Repo` exposes a constructor that takes one `AsyncSession` parameter.</require>
+    <forbid construct="repo-creating-async-session"/>
+  </constraint>
+
+  <constraint id="con.repo-no-http" type="rule">
+    <intent>Repositories never call HTTP or external services; they
+    do SQL only.</intent>
+    <forbid construct="repo-importing-httpx"/>
+    <forbid construct="repo-importing-aioboto3"/>
+  </constraint>
+
+  <constraint id="con.repo-audit-vocabulary-locked" type="rule">
+    <intent>`AuditRepo.append` validates the supplied `event_type`
+    against `AUDIT_EVENT_TYPES` and raises on miss.</intent>
+    <require>`event_type` is checked against `AUDIT_EVENT_TYPES` at the entry of `append`.</require>
+  </constraint>
+
+  <!-- db -->
+
+  <constraint id="con.db-no-http" type="rule">
+    <intent>`src/db/` modules contain no HTTP, no boto, no httpx —
+    only SQLAlchemy and Pydantic models.</intent>
+    <forbid construct="db-importing-httpx"/>
+    <forbid construct="db-importing-aioboto3"/>
+  </constraint>
+
+  <constraint id="con.audit-vocab-single-source" type="pattern">
+    <intent>The audit-event vocabulary is declared exactly once,
+    as a `Literal[...]` in `src/db/models.py`, and is derived for
+    runtime use via `get_args(AuditEventType)`.</intent>
+    <require>`AuditEventType` is a `Literal` declared in `src/db/models.py` and re-exported only by importing it from that module.</require>
+    <forbid construct="duplicate-audit-event-list"/>
+  </constraint>
+
+  <!-- hooks_audit -->
+
+  <constraint id="con.hmac-constant-time" type="rule">
+    <intent>HMAC comparison uses a constant-time primitive
+    (`hmac.compare_digest`).</intent>
+    <require>`verify_hmac_signature` compares MACs with `hmac.compare_digest`.</require>
+    <forbid construct="hmac-compared-with-equality"/>
+  </constraint>
+
+  <constraint id="con.audit-emit-fresh-session" type="rule">
+    <intent>The out-of-band audit-emit closure opens a fresh
+    `AsyncSession` per emit and commits before returning.</intent>
+    <require>`make_audit_emit_closure` returns an async function that opens its own `AsyncSession` and commits.</require>
+    <forbid construct="audit-emit-sharing-request-session"/>
+  </constraint>
+
+  <!-- storage -->
+
+  <constraint id="con.storage-no-orm" type="rule">
+    <intent>`src/storage/` does not import the ORM; it deals only
+    in S3 API calls.</intent>
+    <forbid construct="storage-importing-orm-models"/>
+  </constraint>
+
+  <!-- settings -->
+
+  <constraint id="con.settings-no-runtime-env-reads" type="rule">
+    <intent>Configuration values are read from `Settings` only.
+    Application code never calls `os.environ` for kloc-agent
+    config — settings.py is the single source.</intent>
+    <forbid construct="os-environ-read-outside-settings"/>
+  </constraint>
+
+  <!-- main / lifespan -->
+
+  <constraint id="con.cors-before-routers" type="rule">
+    <intent>`CORSMiddleware` is added before `include_router` calls
+    so browser preflight is handled by Starlette and never falls
+    through to a router's 405.</intent>
+    <require>The `add_middleware(CORSMiddleware, ...)` call precedes every `include_router(...)` call in `create_app`.</require>
+  </constraint>
+
+  <constraint id="con.lifespan-boot-order" type="pattern">
+    <intent>Lifespan boots dependencies in a fixed order:
+    DB engine → S3 client → RunnerRegistry → orphan-container sweep
+    → DB orphan-message scan. Misconfig (missing greenlet, import
+    errors) is allowed to crash boot; only transient operational
+    errors (DB unreachable) are caught.</intent>
+    <require>Lifespan creates the engine, then the S3 client, then the registry, then runs `orphan_sweep`, then runs `sweep_orphaned_messages` — in that order.</require>
+    <require>Only `OperationalError | InterfaceError | DBAPIError` are caught around the boot orphan-message scan.</require>
+    <forbid construct="lifespan-catching-import-error"/>
+  </constraint>
+
+  <!-- Frontend -->
+
+  <constraint id="con.frontend-fetch-only-in-api-client" type="rule">
+    <intent>Network requests (`fetch`, `EventSource`) live in
+    `frontend/src/lib/` only — components never issue HTTP
+    themselves.</intent>
+    <forbid construct="fetch-in-component"/>
+    <forbid construct="eventsource-in-component"/>
+  </constraint>
+
+  <constraint id="con.streaming-via-bff" type="rule">
+    <intent>Browser-initiated SSE traffic goes through
+    `/api/agent-proxy*`, never directly to the backend host.</intent>
+    <forbid construct="browser-eventsource-to-backend-host"/>
+  </constraint>
+
+  <constraint id="con.bff-no-payload-mutation" type="rule">
+    <intent>The BFF route handlers do not parse, transform, or
+    inspect the SSE body; they pipe `upstream.body` straight back
+    with the same content-type and minimal Cache-Control /
+    Connection adjustments.</intent>
+    <forbid construct="bff-parsing-sse-frames"/>
+    <forbid construct="bff-buffering-stream-body"/>
+  </constraint>
+
+  <constraint id="con.component-no-direct-fetch" type="rule">
+    <intent>Components consume state via props and dispatch via
+    callbacks; they do not import from `lib/api.ts` to issue a
+    request inside a render path.</intent>
+    <forbid construct="component-calling-api-client-inline"/>
+  </constraint>
+
+  <constraint id="con.tool-denial-visually-distinct" type="pattern">
+    <intent>A Tool Denial is conveyed by both colour and label,
+    never colour alone, and is visually distinct from a completed
+    Tool Call.</intent>
+    <require>The denied state of `ToolCallCard` renders both a denial label and a distinct colour treatment.</require>
+    <forbid construct="denial-state-colour-only"/>
+  </constraint>
+
+  <!-- Runner -->
+
+  <constraint id="con.runner-mcp-scope-wraps-loop" type="pattern">
+    <intent>The MCP client context manager(s) wrap the entire inbox
+    loop, so a subprocess death is equivalent to a runner exit.</intent>
+    <require>`async with contextlib.AsyncExitStack() as stack:` enters every MCP client before the `async for inbound in channel.iter_inbound():` loop, and the loop runs INSIDE that `with` block.</require>
+  </constraint>
+
+  <constraint id="con.runner-first-turn-merge" type="rule">
+    <intent>On the first turn of a warm container the runner
+    prepends `payload.prior_messages` to `inbound.messages`; on
+    subsequent turns it uses `inbound.messages` only.</intent>
+    <require>The runner tracks a `first_turn` boolean that flips false after the first successful `_run_one_turn`.</require>
+    <forbid construct="prior-messages-merged-on-every-turn"/>
+  </constraint>
+
+  <constraint id="con.channel-replay-on-failure" type="pattern">
+    <intent>On any outbound transport failure, the channel prepends
+    every frame yielded during the broken attempt back into the
+    pending buffer BEFORE draining the queue, so the next attempt's
+    body iterator replays them in original order.</intent>
+    <require>`yielded_this_attempt` is prepended to `pending_after_break` on every reconnect path.</require>
+    <forbid construct="silent-drop-on-transport-failure"/>
+  </constraint>
+
+  <constraint id="con.channel-no-direct-llm-call" type="rule">
+    <intent>`runner/channel.py` does not import the LLM provider
+    SDKs or call them — its only counterparty is `top.backend`.</intent>
+    <forbid construct="channel-importing-anthropic-sdk"/>
+    <forbid construct="channel-importing-gemini-sdk"/>
+  </constraint>
+
+  <constraint id="con.hook-deadline-bounded" type="rule">
+    <intent>`AuditHookSender.before_tool_call` blocks at most 2 s on
+    the backend round-trip; the httpx client is constructed with
+    `timeout=HOOK_DEADLINE_S`.</intent>
+    <require>`AuditHookSender._http = httpx.AsyncClient(timeout=HOOK_DEADLINE_S)`.</require>
+  </constraint>
+
+  <constraint id="con.hook-after-fire-and-forget" type="pattern">
+    <intent>`AfterToolCall` flows through a bounded asyncio queue
+    (maxsize 256). On `QueueFull` the sender emits a single
+    `HookBackpressure` CUSTOM event but never blocks the agent
+    loop.</intent>
+    <require>The After queue uses `put_nowait` and catches `asyncio.QueueFull`.</require>
+    <forbid construct="after-hook-blocking-put"/>
+  </constraint>
+
+
+  <!-- ============================================================
+       CALL-FLOWS — one per operation in interfaces.xml that
+       declares `governed-by`. Each call-flow's `in-unit` matches
+       the operation's contract's `provider`; each `for-use-case`
+       is in the operation's `realizes-behavior`.
+       =========================== -->
+
+  <!-- Public REST -->
+
+  <call-flow id="com.flow.list-sessions"
+             in-unit="top.backend"
+             for-use-case="beh.browse-sessions"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.repos"/>
+    <step component="cmp.backend.db"/>
+  </call-flow>
+
+  <call-flow id="com.flow.create-session"
+             in-unit="top.backend"
+             for-use-case="beh.start-new-session"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.repos"/>
+    <step component="cmp.backend.db"/>
+  </call-flow>
+
+  <call-flow id="com.flow.get-session"
+             in-unit="top.backend"
+             for-use-case="beh.resume-session"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.repos"/>
+    <step component="cmp.backend.db"/>
+  </call-flow>
+
+  <call-flow id="com.flow.list-messages"
+             in-unit="top.backend"
+             for-use-case="beh.resume-session"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.repos"/>
+    <step component="cmp.backend.db"/>
+  </call-flow>
+
+  <call-flow id="com.flow.get-artifact"
+             in-unit="top.backend"
+             for-use-case="beh.ask-assistant"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.repos"/>
+    <step component="cmp.backend.db"/>
+    <step component="cmp.backend.storage"/>
+  </call-flow>
+
+  <!-- Public SSE: the heart of beh.ask-assistant.
+       The flow visits api (POST handler) → streaming (EventBus
+       register-before-publish) → runner-mgmt (get_or_spawn,
+       inbox.put) → streaming (persister + SSE generator) → repos
+       (assistant-row append + finalize). -->
+
+  <call-flow id="com.flow.open-run-stream"
+             in-unit="top.backend"
+             for-use-case="beh.ask-assistant"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.streaming"/>
+    <step component="cmp.backend.runner-mgmt"/>
+    <step component="cmp.backend.repos"/>
+    <step component="cmp.backend.db"/>
+    <step component="cmp.backend.streaming"/>
+  </call-flow>
+
+  <call-flow id="com.flow.resume-run-stream"
+             in-unit="top.backend"
+             for-use-case="beh.recover-from-disconnect"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.streaming"/>
+  </call-flow>
+
+  <!-- Internal runner ingress: chunked JSONL frames from the runner
+       arrive at api/internal, get a monotonic seq from streaming
+       (ExecutionRegistry), and fan out via streaming (EventBus).
+       Lifecycle frames also touch runner-mgmt to reset the
+       heartbeat watcher and start the warm-idle countdown. -->
+
+  <call-flow id="com.flow.ingest-runner-events"
+             in-unit="top.backend"
+             for-use-case="beh.ask-assistant"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.runner-mgmt"/>
+    <step component="cmp.backend.streaming"/>
+  </call-flow>
+
+  <!-- Runner webhook: HMAC verify → policy decide → audit row +
+       (for ArtifactRegistered) artifact_metadata insert in one tx. -->
+
+  <call-flow id="com.flow.runner-webhook"
+             in-unit="top.backend"
+             for-use-case="beh.ask-assistant"
+             direction="inbound">
+    <step component="cmp.backend.api"/>
+    <step component="cmp.backend.hooks-audit"/>
+    <step component="cmp.backend.runner-mgmt"/>
+    <step component="cmp.backend.repos"/>
+    <step component="cmp.backend.db"/>
+  </call-flow>
+
+</spec>

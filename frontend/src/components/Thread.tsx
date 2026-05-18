@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import type { MessageView, SessionViewState } from "@/lib/types";
 import { AnalystBubble } from "./AnalystBubble";
 import { AssistantBubble } from "./AssistantBubble";
+import { PendingAssistantBubble } from "./PendingAssistantBubble";
 
 export function Thread({
   state,
@@ -13,15 +14,18 @@ export function Thread({
   onRetry: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const lastMessageId = state.messages[state.messages.length - 1]?.id ?? null;
-  const lastContent =
-    state.messages[state.messages.length - 1]?.content.length ?? 0;
+  const lastMessage = state.messages[state.messages.length - 1] ?? null;
+  const lastMessageId = lastMessage?.id ?? null;
+  const lastContent = lastMessage?.content.length ?? 0;
+  const showPending =
+    (state.connection === "connecting" || state.connection === "live") &&
+    lastMessage?.role === "user";
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [lastMessageId, lastContent, state.messages.length]);
+  }, [lastMessageId, lastContent, state.messages.length, showPending]);
 
   return (
     <div
@@ -41,6 +45,7 @@ export function Thread({
         ) : (
           state.messages.map((m, i) => renderMessage(m, i, state, onRetry))
         )}
+        {showPending ? <PendingAssistantBubble /> : null}
       </div>
     </div>
   );
