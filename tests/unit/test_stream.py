@@ -363,8 +363,6 @@ async def test_concurrent_reconnect_does_not_double_spawn_persister(
         assert results[0] is not None
         assert results[1] is not None
 
-        # Both concurrent POSTs enqueued onto PGMQ — the producer path
-        # ran for each, no `entry.inbox.put` fallback left over.
         assert len(pgmq_calls) == 2
         assert all(sid_ == sid and rid_ == rid for sid_, rid_, _ in pgmq_calls)
     finally:
