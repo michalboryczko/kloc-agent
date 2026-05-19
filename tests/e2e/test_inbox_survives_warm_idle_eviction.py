@@ -136,7 +136,7 @@ async def test_pending_message_survives_warm_idle_timer_eviction(
 
         assert pickup_latency_s <= 1.0, (
             f"pickup-to-first-event latency {pickup_latency_s:.3f}s "
-            f"exceeds AC1 bound of 1.0s"
+            f"exceeds 1.0s bound"
         )
         assert payload["type"] == "user_message"
         assert payload["run_id"] == run_id
