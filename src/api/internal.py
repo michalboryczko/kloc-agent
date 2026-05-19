@@ -1,7 +1,6 @@
 """Backend↔Runner internal API.
 
 POST /internal/sessions/{id}/events   chunked JSONL ingress (runner → backend)
-GET  /internal/sessions/{id}/inbox    long-poll (backend → runner, ≤ 25 s)
 
 Localhost-only inside the compose bridge; no public auth.
 
@@ -12,10 +11,12 @@ registry's heartbeat watcher; everything else flows to the bus.
 
 AG-UI events carry `runId` (camelCase); runner-internal liveness frames
 carry `type: "heartbeat"`.
+
+Runner-bound messages travel over PGMQ + LISTEN/NOTIFY (see
+`src/messaging/pgmq.py`); there is no HTTP long-poll endpoint here.
 """
 from __future__ import annotations
 
-import asyncio
 import functools
 import json
 import logging
@@ -302,29 +303,3 @@ async def ingest_runner_events(
     )
 
 
-@router.get("/sessions/{session_id}/inbox")
-async def runner_inbox(
-    session_id: uuid.UUID,
-    request: Request,
-    timeout_s: int = 25,
-) -> Response:
-    """Long-poll for outbound user messages headed to the runner.
-
-    Backend-side queue is owned by RunnerRegistry. The registry's
-    inbox_get already enforces the long-poll budget internally and
-    returns None on timeout or when no entry exists for the session.
-    """
-    timeout_s = max(1, min(timeout_s, 30))
-    registry = getattr(request.app.state, "runner_registry", None)
-
-    if registry is None:
-        # Stub mode (no real registry wired). Honour the budget and 204.
-        await asyncio.sleep(timeout_s)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    msg: dict[str, Any] | None = await registry.inbox_get(
-        str(session_id), timeout_s
-    )
-    if msg is None:
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-    return JSONResponse(content=msg, status_code=status.HTTP_200_OK)
