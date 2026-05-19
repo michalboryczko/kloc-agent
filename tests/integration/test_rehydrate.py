@@ -46,8 +46,9 @@ def _make_payload(session_id: str, prior_messages: list[dict]) -> HydrationPaylo
         ],
         skills_dir="/skills",
         backend_url="http://backend:8000",
-        inbox_poll_timeout_s=25,
         heartbeat_interval_s=15,
+        pg_dsn="postgresql+asyncpg://kloc:changeme@postgres:5432/kloc_agent",
+        inbox_queue=f"inbox_{session_id.replace('-', '')}",
     )
 
 

@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from src.db.engine import get_sessionmaker
 from src.db.models import HydrationPayload, McpHttpEndpoint
+from src.messaging.pgmq import inbox_queue_name
 from src.repos.audit import AuditRepo
 from src.repos.messages import MessageRepo
 from src.settings import get_settings
@@ -424,8 +425,9 @@ async def _build_hydration_payload(
         mcp_endpoints=[McpHttpEndpoint(url=mcp_url)],
         skills_dir="/skills",
         backend_url=settings.backend_url,
-        inbox_poll_timeout_s=25,
         heartbeat_interval_s=15,
+        pg_dsn=settings.database_url,
+        inbox_queue=inbox_queue_name(session_id),
     )
 
 

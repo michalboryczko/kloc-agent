@@ -330,5 +330,11 @@ class HydrationPayload(BaseModel):
 
     # Channel
     backend_url: str
-    inbox_poll_timeout_s: int = 25
     heartbeat_interval_s: int = 15
+
+    # PGMQ inbox transport. `pg_dsn` is the asyncpg URL the runner uses
+    # to LISTEN + pgmq.read; `inbox_queue` is the per-session queue name
+    # (deterministic from session_id, see
+    # `src/messaging/pgmq.py:inbox_queue_name`).
+    pg_dsn: str
+    inbox_queue: str
