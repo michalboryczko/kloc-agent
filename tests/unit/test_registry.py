@@ -256,52 +256,6 @@ async def test_on_tool_call_completed_removes_in_flight():
     await registry.shutdown_all()
 
 
-# --- inbox_get (B-INFRA-7a) ------------------------------------------------
-
-
-async def test_inbox_get_returns_none_when_no_entry():
-    """B-INFRA-7a: no spawned runner for the session -> None immediately."""
-    runner = SlowFakeRunner()
-    registry = RunnerRegistry(runner=runner)
-    msg = await registry.inbox_get("unknown-session", timeout_s=0.05)
-    assert msg is None
-
-
-async def test_inbox_get_times_out_when_no_message():
-    """Entry exists but no message arrives within timeout -> None."""
-    runner = SlowFakeRunner()
-    registry = RunnerRegistry(runner=runner, warm_idle_s=60.0)
-    await registry.get_or_spawn("s1", {})
-    msg = await registry.inbox_get("s1", timeout_s=0.05)
-    assert msg is None
-    await registry.shutdown_all()
-
-
-async def test_inbox_get_returns_queued_message():
-    """A message put on entry.inbox by stream_post is delivered by
-    inbox_get on the next long-poll."""
-    runner = SlowFakeRunner()
-    registry = RunnerRegistry(runner=runner, warm_idle_s=60.0)
-    entry = await registry.get_or_spawn("s1", {})
-    payload = {"type": "user_message", "run_id": "r1", "messages": [{"role": "user", "content": "hi"}]}
-    await entry.inbox.put(payload)
-    msg = await registry.inbox_get("s1", timeout_s=1.0)
-    assert msg == payload
-    await registry.shutdown_all()
-
-
-async def test_inbox_get_zero_timeout_returns_immediately():
-    """timeout_s=0 must not block — either return immediately with a
-    queued message or with None."""
-    runner = SlowFakeRunner()
-    registry = RunnerRegistry(runner=runner, warm_idle_s=60.0)
-    await registry.get_or_spawn("s1", {})
-    # Empty queue, zero timeout -> None right away.
-    msg = await registry.inbox_get("s1", timeout_s=0)
-    assert msg is None
-    await registry.shutdown_all()
-
-
 # --- get_by_runner_id O(1) reverse index --------------------------------
 
 

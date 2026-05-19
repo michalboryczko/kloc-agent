@@ -18,13 +18,16 @@ pytestmark = pytest.mark.unit
 
 
 class _NoopEngine:
-    async def begin(self):
+    def begin(self):
         class _Ctx:
             async def __aenter__(self_inner):
                 return self_inner
 
             async def __aexit__(self_inner, exc_type, exc, tb):
                 return False
+
+            async def execute(self_inner, *_args, **_kwargs):
+                return None
 
         return _Ctx()
 

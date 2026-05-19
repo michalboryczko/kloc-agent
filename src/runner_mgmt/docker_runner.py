@@ -186,10 +186,11 @@ class DockerRunner(Runner):
     async def send_user_message(
         self, handle: RunnerHandle, message: dict
     ) -> None:
-        # The real path is RunnerRegistry.inbox; the runner polls it via
-        # the internal HTTP transport. Method kept for Protocol compliance.
+        # Outbound dispatch goes through `src.messaging.pgmq` — the
+        # backend enqueues on the per-session PGMQ queue and the runner
+        # consumes via LISTEN. Method kept for Protocol compliance.
         raise NotImplementedError(
-            "send_user_message is dispatched via RunnerRegistry.inbox"
+            "send_user_message is dispatched via src.messaging.pgmq"
         )
 
     async def stream_events(

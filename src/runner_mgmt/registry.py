@@ -42,7 +42,6 @@ class RegistryEntry:
     handle: "RunnerHandle"
     warm_idle: WarmIdleManager
     heartbeat: HeartbeatWatcher
-    inbox: asyncio.Queue
     audit_emit: Callable[[str, dict], Awaitable[None]] | None
     # In-flight tool calls: tool_call_id -> tool_name. Populated on
     # BeforeToolCall webhook receipt; cleared on AfterToolCall. Used by
@@ -259,8 +258,6 @@ class RunnerRegistry:
     async def _install_entry(
         self, session_id: str, handle: "RunnerHandle"
     ) -> RegistryEntry:
-        inbox: asyncio.Queue = asyncio.Queue(maxsize=64)
-
         # Forward decls — `entry` is filled in after construction so the
         # callbacks can read in_flight_tool_calls off the live record.
         entry_ref: dict[str, RegistryEntry] = {}
@@ -344,7 +341,6 @@ class RunnerRegistry:
             handle=handle,
             warm_idle=warm_idle,
             heartbeat=heartbeat,
-            inbox=inbox,
             audit_emit=self._audit_emit,
         )
         entry_ref["v"] = entry
@@ -367,27 +363,6 @@ class RunnerRegistry:
             if sid is None:
                 return None
             return self._entries.get(sid)
-
-    async def inbox_get(
-        self, session_id: str, timeout_s: float
-    ) -> dict | None:
-        """Pull the next inbound frame for `session_id`, or None on
-        timeout / no entry.
-
-        Returns None immediately if no entry exists for the session.
-        Otherwise waits up to `timeout_s` for the next queued frame.
-        Frames are enqueued by `src/api/stream.py:stream_post` when a
-        new user message arrives.
-        """
-        entry = await self._get_entry(session_id)
-        if entry is None:
-            return None
-        try:
-            return await asyncio.wait_for(
-                entry.inbox.get(), timeout=timeout_s
-            )
-        except asyncio.TimeoutError:
-            return None
 
     def known_runner_ids(self) -> list[str]:
         return [
