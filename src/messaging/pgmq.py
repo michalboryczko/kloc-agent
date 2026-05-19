@@ -51,11 +51,19 @@ async def ensure_extension(conn: Any) -> None:
 async def ensure_inbox_queue(conn: Any, session_id: str) -> str:
     """Create the per-session inbox queue if missing; return its name.
 
-    `pgmq.create` is idempotent — calling it for an existing queue is a
-    no-op rather than an error. (PGMQ ≥ 1.0 renamed `create_queue` to
-    `create`; the Tembo `pg16-pgmq:latest` image ships 1.5.x.)
+    `pgmq.create` is sequentially idempotent — running it twice returns
+    success with NOTICEs — but its internal `CREATE TABLE`/`CREATE
+    SEQUENCE` calls race under concurrent transactions for the same
+    queue (two concurrent `POST /stream` for one session both call this).
+    Serialize with a per-queue advisory transaction lock so the second
+    caller waits for the first to finish creating the underlying
+    relations; the lock releases automatically at transaction end.
     """
     queue = inbox_queue_name(session_id)
+    await conn.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:q))"),
+        {"q": queue},
+    )
     await conn.execute(
         text("SELECT pgmq.create(:q)"), {"q": queue}
     )
