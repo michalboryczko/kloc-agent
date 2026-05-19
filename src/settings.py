@@ -7,10 +7,10 @@ at startup rather than on first request.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 LlmProvider = Literal["anthropic", "openrouter", "bedrock", "gemini"]
@@ -105,7 +105,11 @@ class Settings(BaseSettings):
     def deny_tools_set(self) -> set[str]:
         return {t.strip() for t in self.kloc_deny_tools.split(",") if t.strip()}
 
-    cors_allow_origins: list[str] = Field(
+    # `NoDecode` opts out of pydantic-settings' built-in JSON decoding for
+    # complex types. Without it, a raw string env value like
+    # `http://localhost:3000` would fail `json.loads` before the
+    # `_split_cors_allow_origins` validator below ever ran.
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         validation_alias="KLOC_CORS_ALLOW_ORIGINS",
         description=(
