@@ -1,12 +1,13 @@
-"""Runner ↔ backend channel.
+"""Runner -> backend channel.
 
-Three flows:
-  * outbound: `emit(event)` enqueues; a background task streams events
-    as JSONL over a single chunked `POST /internal/sessions/{id}/events`.
-  * inbound: `iter_inbound()` long-polls `GET /internal/sessions/{id}/inbox`
-    with a 25 s budget (< 30 s heartbeat budget).
+Outbound-only. Two flows:
+  * `emit(event)` enqueues; a background task streams events as JSONL
+    over a single chunked `POST /internal/sessions/{id}/events`.
   * heartbeat: emits `{"type":"heartbeat","busy":bool,"ts":...}` every
     15 s, regardless of activity.
+
+Backend -> runner traffic is handled separately by the runner's PGMQ
+consumer module, not by this channel.
 """
 
 from __future__ import annotations
@@ -15,14 +16,12 @@ import asyncio
 import json
 import logging
 import time
-from typing import AsyncIterator
 
 import httpx
 
 log = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_S = 15.0
-INBOX_POLL_TIMEOUT_S = 25.0
 
 
 class BackendChannel:
@@ -80,43 +79,6 @@ class BackendChannel:
             self._busy,
         )
         await self._outbound.put(event)
-
-    async def iter_inbound(self) -> AsyncIterator[dict]:
-        """Long-poll the backend inbox. Yields one message per poll
-        response. Backend returns 204 on timeout; we just re-poll."""
-        assert self._http is not None
-        url = (
-            f"{self._backend_url}/internal/sessions/"
-            f"{self._session_id}/inbox"
-        )
-        while True:
-            try:
-                r = await self._http.get(
-                    url, timeout=INBOX_POLL_TIMEOUT_S + 5
-                )
-            except httpx.TimeoutException:
-                continue
-            except Exception:
-                log.exception("channel.inbox_poll_failed")
-                await asyncio.sleep(1.0)
-                continue
-            if r.status_code == 204:
-                continue
-            if r.status_code != 200:
-                log.warning(
-                    "channel.inbox_unexpected_status",
-                    extra={"status": r.status_code},
-                )
-                await asyncio.sleep(1.0)
-                continue
-            try:
-                msg = r.json()
-            except Exception:
-                log.exception("channel.inbox_decode_failed")
-                continue
-            if msg.get("type") == "shutdown":
-                return
-            yield msg
 
     async def _stream_outbound(self) -> None:
         """Single chunked POST whose body is a long-lived JSONL stream.

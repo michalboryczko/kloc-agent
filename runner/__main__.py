@@ -4,9 +4,12 @@
   2. open `MCPClient`(s) in a `with` scope (lifecycle == whole run)
   3. build the Strands agent via `agent_factory`
   4. wrap in `ag_ui_strands.StrandsAgent`
-  5. enter the `iter_inbound()` long-poll loop
+  5. enter the PGMQ inbox-consume loop (`consume_inbox` — LISTEN +
+     `pgmq.read` against the session's durable inbox queue)
   6. on each user message, call `agui_agent.run(RunAgentInput)` and
-     `await channel.emit(event)` per yielded AG-UI event.
+     `await channel.emit(event)` per yielded AG-UI event, then ack the
+     PGMQ message via `delete_message` so it is not redelivered after
+     the visibility timeout.
 
 The MCP `with` scope wraps the whole event loop so an MCPClient
 subprocess death is equivalent to a runner exit.
@@ -27,6 +30,7 @@ from typing import Any
 from .agent_factory import build_agent, wrap_for_agui
 from .channel import BackendChannel
 from .hooks.audit import AuditHookSender
+from .inbox_consumer import consume_inbox, delete_message
 from .mcp_clients import build_mcp_clients
 
 log = logging.getLogger(__name__)
@@ -50,16 +54,18 @@ def _read_hydration() -> dict:
 
 
 async def _run() -> None:
-    payload = _read_hydration()
-    session_id = payload["session_id"]
-    runner_id = payload["runner_id"]
-    initial_run_id = payload["run_id"]
-    runner_secret = payload["runner_secret"]
-    backend_url = payload.get("backend_url") or os.environ.get(
+    hydration = _read_hydration()
+    session_id = hydration["session_id"]
+    runner_id = hydration["runner_id"]
+    initial_run_id = hydration["run_id"]
+    runner_secret = hydration["runner_secret"]
+    backend_url = hydration.get("backend_url") or os.environ.get(
         "KLOC_BACKEND_URL"
     )
     if not backend_url:
         raise RuntimeError("hydration missing backend_url")
+    pg_dsn = hydration["pg_dsn"]
+    inbox_queue = hydration["inbox_queue"]
 
     current_run_id = {"value": initial_run_id}
 
@@ -84,7 +90,7 @@ async def _run() -> None:
     )
     await audit_sender.start()
 
-    mcp_endpoints = payload.get("mcp_endpoints") or []
+    mcp_endpoints = hydration.get("mcp_endpoints") or []
     mcp_clients = build_mcp_clients(mcp_endpoints)
 
     try:
@@ -104,7 +110,7 @@ async def _run() -> None:
                 mcp_tools.extend(client.list_tools_sync())
 
             strands_agent, audit_provider = build_agent(
-                payload, mcp_tools, audit_sender
+                hydration, mcp_tools, audit_sender
             )
             agui_agent = wrap_for_agui(strands_agent, audit_provider)
 
@@ -117,12 +123,20 @@ async def _run() -> None:
             )
 
             first_turn = True
-            async for inbound in channel.iter_inbound():
+            async for msg_id, inbound in consume_inbox(
+                pg_dsn=pg_dsn,
+                session_id=session_id,
+                queue_name=inbox_queue,
+            ):
+                if inbound.get("type") == "shutdown":
+                    await delete_message(pg_dsn, inbox_queue, msg_id)
+                    break
                 if inbound.get("type") != "user_message":
                     log.warning(
                         "runner.unexpected_inbound",
                         extra={"type": inbound.get("type")},
                     )
+                    await delete_message(pg_dsn, inbox_queue, msg_id)
                     continue
                 current_run_id["value"] = inbound.get("run_id") or str(
                     uuid.uuid4()
@@ -135,12 +149,13 @@ async def _run() -> None:
                         channel=channel,
                         session_id=session_id,
                         run_id=current_run_id["value"],
-                        payload=payload,
+                        payload=hydration,
                         first_turn=first_turn,
                     )
                     first_turn = False
                 finally:
                     channel.set_busy(False)
+                    await delete_message(pg_dsn, inbox_queue, msg_id)
     finally:
         await audit_sender.stop()
         await channel.stop()
