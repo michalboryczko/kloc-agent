@@ -89,18 +89,15 @@ class _FakeWarmIdle:
 
 @dataclass
 class _FakeEntry:
-    inbox: asyncio.Queue
     warm_idle: _FakeWarmIdle
 
 
 class _FakeRegistry:
     """Minimal RunnerRegistry stand-in: get_or_spawn returns a static entry
-    with an inbox queue and a no-op warm-idle manager. No DB, no Docker."""
+    with a no-op warm-idle manager. No DB, no Docker."""
 
     def __init__(self) -> None:
-        self._entry = _FakeEntry(
-            inbox=asyncio.Queue(), warm_idle=_FakeWarmIdle()
-        )
+        self._entry = _FakeEntry(warm_idle=_FakeWarmIdle())
 
     async def get_or_spawn(self, session_id: str, payload: Any):
         return self._entry
@@ -294,6 +291,31 @@ async def test_concurrent_reconnect_does_not_double_spawn_persister(
         # the generator so it doesn't leak.
         return {"generator": generator}
 
+    pgmq_calls: list[tuple[str, str, list]] = []
+
+    async def _fake_ensure_inbox_queue(_conn, session_id):
+        return f"inbox_{session_id.replace('-', '')}"
+
+    async def _fake_send_user_message(_conn, session_id, run_id, messages):
+        pgmq_calls.append((session_id, run_id, messages))
+        return len(pgmq_calls)
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def connection(self):
+            return None
+
+        async def commit(self):
+            return None
+
+    def _fake_sessionmaker():
+        return lambda: _FakeSession()
+
     monkeypatch.setattr(stream_mod, "_persist_events", _fake_persister)
     monkeypatch.setattr(
         stream_mod, "_persist_user_message", _noop_persist_user
@@ -302,6 +324,13 @@ async def test_concurrent_reconnect_does_not_double_spawn_persister(
         stream_mod, "_build_hydration_payload", _fake_build_hydration
     )
     monkeypatch.setattr(stream_mod, "make_response", _fake_make_response)
+    monkeypatch.setattr(
+        stream_mod, "ensure_inbox_queue", _fake_ensure_inbox_queue
+    )
+    monkeypatch.setattr(
+        stream_mod, "send_user_message", _fake_send_user_message
+    )
+    monkeypatch.setattr(stream_mod, "get_sessionmaker", _fake_sessionmaker)
 
     sid = str(uuid.uuid4())
     rid = "rA"
@@ -333,6 +362,11 @@ async def test_concurrent_reconnect_does_not_double_spawn_persister(
         # Both calls returned a (stub) response — neither raised.
         assert results[0] is not None
         assert results[1] is not None
+
+        # Both concurrent POSTs enqueued onto PGMQ — the producer path
+        # ran for each, no `entry.inbox.put` fallback left over.
+        assert len(pgmq_calls) == 2
+        assert all(sid_ == sid and rid_ == rid for sid_, rid_, _ in pgmq_calls)
     finally:
         # Cancel the long-lived fake persister so the test loop closes
         # cleanly.

@@ -19,7 +19,11 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from src.db.engine import get_sessionmaker
 from src.db.models import HydrationPayload, McpHttpEndpoint
-from src.messaging.pgmq import inbox_queue_name
+from src.messaging.pgmq import (
+    ensure_inbox_queue,
+    inbox_queue_name,
+    send_user_message,
+)
 from src.repos.audit import AuditRepo
 from src.repos.messages import MessageRepo
 from src.settings import get_settings
@@ -69,10 +73,10 @@ async def stream_post(
 
     # Build hydration BEFORE persisting the new user message so
     # `prior_messages` snapshots the DB state *without* the new turn.
-    # The new turn arrives at the runner via `inbox.put` below, and the
-    # runner merges `prior_messages + inbound.messages`; including the
-    # new message in both lists doubles it in `RunAgentInput.messages`
-    # and the UI renders the user bubble twice.
+    # The new turn arrives at the runner via PGMQ below, and the runner
+    # merges `prior_messages + inbound.messages`; including the new
+    # message in both lists doubles it in `RunAgentInput.messages` and
+    # the UI renders the user bubble twice.
     hydration_payload = await _build_hydration_payload(
         session_id=session_id,
         session_uuid=session_uuid,
@@ -82,11 +86,11 @@ async def stream_post(
     entry = await registry.get_or_spawn(session_id, hydration_payload)
     entry.warm_idle.on_user_message()
 
-    # Subscribe-before-publish: register the SSE queue BEFORE telling the
-    # runner to start. A warm runner can begin emitting events the moment
-    # `inbox.put` completes, and `event_bus.publish` drops events when no
-    # subscriber queue exists yet. Registering first guarantees the queue
-    # is in `_subs` when the runner's first event lands.
+    # Subscribe-before-publish: register the SSE queue BEFORE the runner
+    # is woken. A warm runner can begin emitting events the moment
+    # `pgmq.send + NOTIFY` commits, and `event_bus.publish` drops events
+    # when no subscriber queue exists yet. Registering first guarantees
+    # the queue is in `_subs` when the runner's first event lands.
     queue = await event_bus.register(session_id, run_id)
 
     # Anything that raises between register and the StreamingResponse
@@ -94,14 +98,14 @@ async def stream_post(
     # forever (consume's finally never runs). Cleanup via unregister
     # on every error path before re-raising.
     try:
-        # Forward the new user message to the runner via the inbox queue.
-        await entry.inbox.put(
-            {
-                "type": "user_message",
-                "run_id": run_id,
-                "messages": messages,
-            }
-        )
+        # Enqueue the user_message on the per-session PGMQ queue and
+        # NOTIFY the runner inside one transaction so the runner's
+        # LISTEN wakes only after the row is durably committed.
+        async with get_sessionmaker()() as db:
+            conn = await db.connection()
+            await ensure_inbox_queue(conn, session_id)
+            await send_user_message(conn, session_id, run_id, messages)
+            await db.commit()
 
         # Dedup the persister task by (session_id, run_id). Two
         # concurrent POST /stream calls for the same in-flight run must
