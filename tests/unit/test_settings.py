@@ -75,6 +75,7 @@ def test_openrouter_provider_does_not_require_key(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
+    monkeypatch.delenv("ALLOW_HMAC_FALLBACK", raising=False)
     monkeypatch.chdir(tmp_path)
 
     s = Settings(_env_file=None)  # type: ignore[call-arg]
@@ -93,6 +94,7 @@ def test_bedrock_provider_does_not_require_key(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
+    monkeypatch.delenv("ALLOW_HMAC_FALLBACK", raising=False)
     monkeypatch.chdir(tmp_path)
 
     s = Settings(_env_file=None)  # type: ignore[call-arg]
