@@ -250,9 +250,11 @@ async def app_in_process() -> AsyncIterator[Any]:
     have MinIO reachable.
 
     Skips the test cleanly when:
-    - `greenlet` is missing (dev-1 pyproject bug — surfaces as ValueError
-      from SQLAlchemy `_not_implemented`)
+    - `greenlet` is missing (surfaces as ValueError from SQLAlchemy
+      `_not_implemented`)
     - Postgres / MinIO is unreachable (OperationalError / EndpointConnectionError)
+    - The PGMQ extension is not installed on the Postgres instance
+      (lifespan step 1a `ensure_extension` raises DBAPIError)
     """
     from src.main import create_app
 
@@ -275,7 +277,10 @@ async def app_in_process() -> AsyncIterator[Any]:
                 "connection refused",
                 "could not connect",
                 "name or service not known",
+                "nodename nor servname provided",
                 "endpointconnectionerror",
+                "pgmq",
+                "extension",
             )
         ):
             pytest.skip(f"backend dependency unreachable: {exc}")
