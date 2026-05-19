@@ -279,11 +279,11 @@
   </contract>
 
   <!-- ============================================================
-       Contract D: internal backend↔runner ingress / inbox. NOT
-       exposed beyond the compose bridge — the runner is the only
-       consumer. Documented because the runner is an internal unit
-       and this is the high-volume in-process surface the streaming
-       behaviour depends on.
+       Contract D: internal runner-to-backend NDJSON event ingress.
+       NOT exposed beyond the compose bridge — the runner is the
+       only consumer. The companion long-poll inbox operation that
+       used to live alongside `ifc.ingest-runner-events` is gone;
+       backend-to-runner traffic now flows over PGMQ (Contract G).
        =========================== -->
 
   <contract id="ifc.internal-runner-ingress"
@@ -314,20 +314,81 @@
                     caller-action="retry-with-backoff"
                     provider-promise="frames-already-dispatched-persist"/>
     </operation>
+  </contract>
 
-    <operation id="ifc.runner-inbox"
-               contract="ifc.internal-runner-ingress"
-               name="GET /internal/sessions/{session_id}/inbox"
-               intent="Long-poll up to 25 s for a queued user-message or shutdown frame headed to this Session's runner; 204 if no frame within budget."
+  <!-- ============================================================
+       Contract G: PGMQ-backed durable inbox bus. Replaces the
+       deleted long-poll HTTP inbox. Provider is `top.postgres`
+       (the queue rows ARE the wire); both backend and runner are
+       consumers — backend produces (`inbox-enqueue`), runner
+       consumes (`inbox-consume`) and acks (`inbox-ack`). Queue
+       identity is keyed by `session_id` alone so a fresh runner
+       attaching to the same Session reads from the same queue —
+       the structural fix for the queue-identity-drift root cause
+       documented in tasks/fix-runner-inbox/root-cause.md.
+       =========================== -->
+
+  <contract id="ifc.inbox-bus"
+            provider="top.postgres"
+            consumers="top.backend,top.runner"
+            style="command-bus"
+            spec-ref="./schemas/inbox.asyncapi.yaml">
+
+    <operation id="ifc.inbox-enqueue"
+               contract="ifc.inbox-bus"
+               name="pgmq.send + NOTIFY inbox_{slug}"
+               intent="Enqueue one user-message frame onto the Session's durable inbox queue and wake any LISTEN-ing consumer immediately."
                mode="sync-request-response"
                consistency="strong"
-               delivery="at-most-once"
-               idempotency="not-applicable">
+               delivery="at-least-once"
+               idempotency="not-applicable"
+               realizes-behavior="beh.ask-assistant"
+               governed-by="com.flow.open-run-stream">
+      <schema-ref role="input"  format="asyncapi"
+                  uri="./schemas/inbox.asyncapi.yaml#/components/messages/InboxFrame"/>
       <schema-ref role="output" format="asyncapi"
-                  uri="./schemas/agui-events.asyncapi.yaml#/components/messages/InboxFrame"/>
-      <failure-mode condition="timeout-no-message"
+                  uri="./schemas/inbox.asyncapi.yaml#/components/messages/EnqueueResult"/>
+      <failure-mode condition="extension-missing"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="db-unavailable"
+                    caller-action="fail-fast"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+
+    <operation id="ifc.inbox-consume"
+               contract="ifc.inbox-bus"
+               name="LISTEN inbox_{slug} + pgmq.read(vt=300, qty=1)"
+               intent="Block on the Session's inbox until a user-message arrives, then return exactly one queued frame with a 300 s visibility timeout so non-acked redelivery covers consumer death."
+               mode="stream-pull"
+               consistency="strong"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.ask-assistant">
+      <schema-ref role="output" format="asyncapi"
+                  uri="./schemas/inbox.asyncapi.yaml#/components/messages/InboxFrame"/>
+      <failure-mode condition="notify-missed-during-reconnect"
                     caller-action="retry-with-backoff"
-                    provider-promise="204-then-caller-re-polls"/>
+                    provider-promise="fallback-poll-30s-wakes-listener"/>
+      <failure-mode condition="db-connection-lost"
+                    caller-action="retry-with-backoff"
+                    provider-promise="unacked-message-redelivered-after-vt"/>
+    </operation>
+
+    <operation id="ifc.inbox-ack"
+               contract="ifc.inbox-bus"
+               name="pgmq.delete(queue, msg_id)"
+               intent="Acknowledge a successfully processed inbox frame so PGMQ does not redeliver it after the visibility timeout."
+               mode="sync-request-response"
+               consistency="strong"
+               delivery="at-least-once"
+               idempotency="required"
+               realizes-behavior="beh.ask-assistant">
+      <schema-ref role="input"  format="asyncapi"
+                  uri="./schemas/inbox.asyncapi.yaml#/components/messages/AckRequest"/>
+      <failure-mode condition="db-unavailable"
+                    caller-action="retry-with-backoff"
+                    provider-promise="message-redelivered-on-vt-expiry"/>
     </operation>
   </contract>
 

@@ -41,7 +41,10 @@
       `APIRouter` mounted from `src/main.py`:
       - sessions.py — public REST for Session lifecycle
       - stream.py — public SSE (POST + GET)
-      - internal.py — backend↔runner JSONL ingress + long-poll inbox
+      - internal.py — backend←runner JSONL ingress (outbound only;
+        the prior long-poll inbox endpoint
+        `GET /internal/sessions/{id}/inbox` is gone — backend→runner
+        traffic now flows over PGMQ)
       - webhooks.py — HMAC-verified runner webhook receiver
       - artifacts.py — presigned redirect for artifact bytes
       - stop.py — cancel-run forwarder
@@ -52,12 +55,14 @@
       <rule>Validate path / body / query before any repo or registry call.</rule>
       <rule>For state-changing endpoints, commit the DB transaction before returning the response so the caller's read-your-writes view holds.</rule>
       <rule>For `POST /v1/sessions/{id}/messages` the user Message is appended and committed before the response is returned, so the caller can immediately open the stream and the runner sees the message in `prior_messages`.</rule>
-      <rule>For `POST /v1/sessions/{id}/stream` register the SSE subscriber on the EventBus before calling `inbox.put`, so a warm runner's first frame is not dropped.</rule>
+      <rule>For `POST /v1/sessions/{id}/stream` register the SSE subscriber on the EventBus BEFORE invoking the messaging producer (`cmp.backend.messaging.send_user_message`) so a warm runner's first frame is not dropped.</rule>
+      <rule>For `POST /v1/sessions/{id}/stream` the user-message enqueue is delegated to `cmp.backend.messaging`; the API module never calls `pgmq.*` or `NOTIFY` directly, never holds an `asyncio.Queue` of pending user messages, and never references `RegistryEntry.inbox` (which no longer exists).</rule>
       <rule>For `POST /v1/webhooks/...` resolve the per-runner HMAC secret BEFORE running HMAC verification; reject with 401 if the registry has no entry and fallback is not allowed, never test the bootstrap secret against an unknown `runner_id`.</rule>
       <rule>For artifact registration, audit row + ON CONFLICT INSERT + policy decision commit in the same transaction.</rule>
     </logic>
     <requires ref="cmp.backend.streaming"/>
     <requires ref="cmp.backend.runner-mgmt"/>
+    <requires ref="cmp.backend.messaging"/>
     <requires ref="cmp.backend.repos"/>
     <requires ref="cmp.backend.hooks-audit"/>
     <requires ref="cmp.backend.storage"/>
@@ -67,6 +72,44 @@
       <constraint ref="con.api-no-direct-orm-query"/>
       <constraint ref="con.api-no-business-rules"/>
       <constraint ref="con.commit-before-return"/>
+      <constraint ref="con.api-no-direct-pgmq"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.messaging" zone="src/messaging/" in-unit="top.backend">
+    <intent>PGMQ-backed transport for backend-to-runner user
+    messages. Owns the extension bootstrap, the per-Session queue
+    lifecycle, and the producer-side `pgmq.send` + `NOTIFY` pairing
+    that wakes the runner's `LISTEN` immediately. Queue identity is
+    a pure function of `session_id` so it survives any
+    `RegistryEntry` swap (warm-idle eviction, crash respawn,
+    spawn-lock retry), structurally eliminating the
+    queue-identity-drift class of bug documented in
+    `tasks/fix-runner-inbox/root-cause.md`. Holds no `asyncio.Queue`
+    of its own; the only stateful element here is the Postgres
+    queue itself.</intent>
+    <structure>
+      - pgmq.py — `ensure_extension(conn)` (CREATE EXTENSION IF NOT
+        EXISTS pgmq), `inbox_queue_name(session_id) -> str`
+        (`inbox_{session_id_no_dashes}`),
+        `ensure_inbox_queue(conn, session_id)` (idempotent
+        `pgmq.create_queue`), `send_user_message(conn, session_id,
+        run_id, messages) -> msg_id` (pgmq.send + NOTIFY in one tx),
+        `drop_inbox_queue(conn, session_id)` (called from
+        Session.close).
+    </structure>
+    <logic>
+      <rule>Every `send_user_message` issues `pgmq.send` and `NOTIFY inbox_{slug}` in the same DB transaction so the LISTEN-ing runner cannot wake before the row is visible.</rule>
+      <rule>Queue identity is derived solely from `session_id` (`inbox_queue_name`); the function never reads any field of `RegistryEntry` or any other per-spawn object.</rule>
+      <rule>`ensure_inbox_queue` is idempotent — a second call with the same `session_id` is a no-op so producer-side callers never race on first-message creation.</rule>
+      <rule>`drop_inbox_queue` is called only from the Session-close path, never from runner eviction; pending messages must survive eviction.</rule>
+    </logic>
+    <requires ref="cmp.backend.db"/>
+    <constraints>
+      <constraint ref="con.messaging-send-notify-same-tx"/>
+      <constraint ref="con.inbox-queue-name-from-session-id"/>
+      <constraint ref="con.messaging-no-asyncio-queue"/>
+      <constraint ref="con.drop-queue-only-on-session-close"/>
     </constraints>
   </component>
 

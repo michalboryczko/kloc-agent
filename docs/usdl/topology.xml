@@ -61,9 +61,17 @@
     state: `sessions`, `messages` (per-Session monotonic `seq`),
     `audit_log` (locked vocabulary of 12 event names),
     `artifact_metadata` (idempotent on `(session_id, object_key)`).
-    Reached over async asyncpg (pool size 10, max overflow 20,
-    pre-ping). Postgres 16-alpine in dev compose.</description>
-    <tech>PostgreSQL 16</tech>
+    Also hosts the PGMQ extension which holds one durable inbox
+    queue per Session (`inbox_{session_id_no_dashes}`) — the
+    backend-to-runner transport for user-message frames, paired
+    with `NOTIFY inbox_{slug}` for sub-millisecond wake-up of the
+    runner's `LISTEN`. Queue rows survive runner eviction and
+    backend restart in the same WAL that protects `messages` and
+    `audit_log`. Reached over async asyncpg (pool size 10, max
+    overflow 20, pre-ping). Image swapped from `postgres:16-alpine`
+    to a pgmq-bundled flavour
+    (`quay.io/tembo/pg16-pgmq:latest`).</description>
+    <tech>PostgreSQL 16 + PGMQ extension</tech>
   </unit>
 
   <unit id="top.minio" kind="object-store" owner="kloc-team">
@@ -223,7 +231,7 @@
     no-transform; Connection: keep-alive.</note>
   </communication>
 
-  <!-- Backend -> Postgres (durable state) -->
+  <!-- Backend -> Postgres (OLTP — durable domain state) -->
 
   <communication id="top.com.backend-to-postgres"
                  from="top.backend"
@@ -233,8 +241,29 @@
                  consistency="strong"
                  delivery="not-applicable">
     <note>Async asyncpg connection pool. Reads + writes for sessions,
-    messages, audit_log, artifact_metadata. No exposed
-    contract.</note>
+    messages, audit_log, artifact_metadata. Pure OLTP — the inbox
+    transport now flows over a separate logical edge
+    (`top.com.backend-to-postgres-inbox`) even though it shares the
+    same asyncpg pool.</note>
+  </communication>
+
+  <!-- Backend -> Postgres (PGMQ inbox producer + NOTIFY) -->
+
+  <communication id="top.com.backend-to-postgres-inbox"
+                 from="top.backend"
+                 to="top.postgres"
+                 via="sql"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="at-least-once"
+                 carries="ifc.inbox-enqueue">
+    <note>One round-trip per user-message: `pgmq.send(queue,
+    payload)` paired with `NOTIFY inbox_{slug}` in the same
+    transaction so the runner's `LISTEN` wakes the moment the row
+    commits. Queue name is derived from `session_id` alone
+    (`inbox_{session_id_no_dashes}`), NOT from any per-spawn
+    registry entry — that is what structurally eliminates the
+    "identity drift on eviction" failure class.</note>
   </communication>
 
   <!-- Backend -> MinIO (artifact presigning + readyz probe) -->
@@ -354,18 +383,26 @@
     loss of terminal frames.</note>
   </communication>
 
-  <!-- Runner -> Backend (long-poll inbox) -->
+  <!-- Runner -> Postgres (PGMQ inbox consumer: LISTEN + read + ack) -->
 
-  <communication id="top.com.runner-from-backend-inbox"
+  <communication id="top.com.runner-to-postgres-inbox"
                  from="top.runner"
-                 to="top.backend"
-                 via="http"
-                 mode="sync-request-response"
+                 to="top.postgres"
+                 via="sql"
+                 mode="stream-pull"
                  consistency="strong"
-                 delivery="at-most-once"
-                 carries="ifc.runner-inbox">
-    <note>25 s long-poll. 204 on idle, 200 on a queued user-message
-    frame or `{"type":"shutdown"}` sentinel.</note>
+                 delivery="at-least-once"
+                 carries="ifc.inbox-consume">
+    <note>Single long-lived asyncpg connection per runner. Issues
+    `LISTEN inbox_{slug}` on attach, then alternates
+    `pgmq.read(queue, vt=300, qty=1)` (consume) and `pgmq.delete(
+    queue, msg_id)` (ack-after-process). The `NOTIFY` from the
+    backend's enqueue path wakes the listener immediately; a 30 s
+    fallback poll covers missed notifications across reconnects.
+    `vt=300s` redelivers the message to the next consumer if the
+    current one disconnects before deleting — that is the
+    survives-eviction guarantee. Replaces the prior HTTP long-poll
+    (`top.com.runner-from-backend-inbox`, deleted).</note>
   </communication>
 
   <!-- Runner -> Backend (HMAC audit webhooks) -->
