@@ -319,6 +319,70 @@ async def asgi_client(app_in_process) -> AsyncIterator[Any]:
         yield client
 
 
+class _RegisteredRunner:
+    """Test handle to a stub entry installed on `RunnerRegistry`.
+
+    Carries the `runner_id` and per-runner `secret` the webhook receiver
+    will resolve via `RunnerRegistry.get_by_runner_id`; the receiver's
+    strict mode rejects HMAC requests for unknown runner_ids, so e2e
+    webhook tests must pre-install an entry instead of signing with the
+    global bootstrap secret.
+    """
+
+    def __init__(self, runner_id: str, secret: str, session_id: str) -> None:
+        self.runner_id = runner_id
+        self.secret = secret
+        self.session_id = session_id
+
+
+@pytest_asyncio.fixture
+async def registered_runner(app_in_process) -> AsyncIterator[_RegisteredRunner]:
+    """Install a stub RegistryEntry that the HMAC webhook receiver can
+    resolve via `RunnerRegistry.get_by_runner_id`.
+
+    Webhook tests run against the production strict-mode auth path: the
+    receiver looks up `runner_id` in the registry and HMAC-verifies with
+    the per-runner secret. Without a registered entry the receiver
+    refuses with 401 "unknown runner" before HMAC verification runs.
+
+    The stub bypasses `_install_entry` (which would start warm-idle and
+    heartbeat watchers) — we only need `entry.handle.runner_secret` for
+    the secret-resolution path and the runner_id -> session_id reverse
+    index. Cleanup pops the dicts before lifespan shutdown so
+    `shutdown_all` does not see a watcher-less entry.
+    """
+    from types import SimpleNamespace
+
+    runner_id = f"test-runner-{uuid.uuid4().hex[:8]}"
+    secret = f"test-secret-{uuid.uuid4().hex}"
+    session_id = str(uuid.uuid4())
+
+    registry = app_in_process.state.runner_registry
+    handle = SimpleNamespace(
+        session_id=session_id,
+        runner_id=runner_id,
+        runner_secret=secret,
+        container_id=f"test-container-{runner_id}",
+    )
+    entry = SimpleNamespace(
+        handle=handle,
+        in_flight_tool_calls={},
+    )
+
+    async with registry._lock:
+        registry._by_runner_id[runner_id] = session_id
+        registry._entries[session_id] = entry
+
+    try:
+        yield _RegisteredRunner(
+            runner_id=runner_id, secret=secret, session_id=session_id
+        )
+    finally:
+        async with registry._lock:
+            registry._by_runner_id.pop(runner_id, None)
+            registry._entries.pop(session_id, None)
+
+
 # ---------------------------------------------------------------------------
 # Runner Protocol fake (real today — dev-2 shipped the Protocol)
 # ---------------------------------------------------------------------------

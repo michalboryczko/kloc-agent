@@ -182,7 +182,7 @@ async def test_artifact_webhook_rejects_stale_timestamp(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_artifact_webhook_first_call_returns_202(
-    asgi_client, db_session, truncate_all_tables
+    asgi_client, db_session, truncate_all_tables, registered_runner
 ):
     """AC23 part 1: webhook with valid HMAC + existing session → 202 +
     artifact_metadata row created + audit row recorded."""
@@ -196,7 +196,7 @@ async def test_artifact_webhook_first_call_returns_202(
     session_id = uuid.UUID(create.json()["session_id"])
 
     artifact_id = uuid.uuid4()
-    runner_id = "r-test-1"
+    runner_id = registered_runner.runner_id
     body_dict = _artifact_webhook_body(
         session_id=session_id,
         artifact_id=artifact_id,
@@ -204,7 +204,7 @@ async def test_artifact_webhook_first_call_returns_202(
         run_id=str(uuid.uuid4()),
     )
     body_bytes = json.dumps(body_dict).encode()
-    headers = _make_webhook_headers(body_bytes)
+    headers = _make_webhook_headers(body_bytes, secret=registered_runner.secret)
     headers["X-Kloc-Hook-Event"] = "ArtifactRegistered"
 
     resp = await asgi_client.post(
@@ -255,7 +255,7 @@ async def test_artifact_webhook_first_call_returns_202(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_artifact_webhook_idempotent_via_unique_constraint(
-    asgi_client, db_session, truncate_all_tables
+    asgi_client, db_session, truncate_all_tables, registered_runner
 ):
     """AC23: two webhook POSTs with the same (session_id, object_key) →
     exactly ONE artifact_metadata row + the duplicate POST returns
@@ -268,7 +268,7 @@ async def test_artifact_webhook_idempotent_via_unique_constraint(
     session_id = uuid.UUID(create.json()["session_id"])
 
     artifact_id = uuid.uuid4()
-    runner_id = "r-test-idem"
+    runner_id = registered_runner.runner_id
     body_dict = _artifact_webhook_body(
         session_id=session_id,
         artifact_id=artifact_id,
@@ -279,7 +279,7 @@ async def test_artifact_webhook_idempotent_via_unique_constraint(
     async def _post() -> dict:
         # Each POST gets a fresh signature/timestamp; body is identical.
         body_bytes = json.dumps(body_dict).encode()
-        headers = _make_webhook_headers(body_bytes)
+        headers = _make_webhook_headers(body_bytes, secret=registered_runner.secret)
         headers["X-Kloc-Hook-Event"] = "ArtifactRegistered"
         resp = await asgi_client.post(
             f"/v1/webhooks/runners/{runner_id}/events",
@@ -317,7 +317,7 @@ async def test_artifact_webhook_idempotent_via_unique_constraint(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_artifact_presigned_redirect_shape(
-    asgi_client, db_session, truncate_all_tables
+    asgi_client, db_session, truncate_all_tables, registered_runner
 ):
     """AC23 retrieval: GET /v1/artifacts/{id} returns 302 OR 503.
 
@@ -330,7 +330,7 @@ async def test_artifact_presigned_redirect_shape(
     session_id = uuid.UUID(create.json()["session_id"])
 
     artifact_id = uuid.uuid4()
-    runner_id = "r-test-presigned"
+    runner_id = registered_runner.runner_id
     body_dict = _artifact_webhook_body(
         session_id=session_id,
         artifact_id=artifact_id,
@@ -338,7 +338,7 @@ async def test_artifact_presigned_redirect_shape(
         run_id=str(uuid.uuid4()),
     )
     body_bytes = json.dumps(body_dict).encode()
-    headers = _make_webhook_headers(body_bytes)
+    headers = _make_webhook_headers(body_bytes, secret=registered_runner.secret)
     headers["X-Kloc-Hook-Event"] = "ArtifactRegistered"
     register = await asgi_client.post(
         f"/v1/webhooks/runners/{runner_id}/events",

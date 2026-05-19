@@ -155,7 +155,7 @@ pytestmark_int = pytest.mark.integration  # alias to keep marker explicit per te
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_webhook_deny_path_returns_deny_decision_and_audit(
-    asgi_client, db_session, truncate_all_tables, deny_tools
+    asgi_client, db_session, truncate_all_tables, deny_tools, registered_runner
 ):
     """AC19: BeforeToolCall for a tool in KLOC_DENY_TOOLS →
     response={"decision":"deny","reason":"test-deny:<tool>"} AND audit row
@@ -173,7 +173,7 @@ async def test_webhook_deny_path_returns_deny_decision_and_audit(
     create = await asgi_client.post("/v1/sessions", json={})
     session_id = uuid.UUID(create.json()["session_id"])
 
-    runner_id = "r-deny-1"
+    runner_id = registered_runner.runner_id
     body_dict = _before_tool_call_body(
         session_id=session_id,
         runner_id=runner_id,
@@ -181,7 +181,7 @@ async def test_webhook_deny_path_returns_deny_decision_and_audit(
         tool_name="kloc_source",
     )
     body_bytes = json.dumps(body_dict).encode()
-    headers = _make_webhook_headers(body_bytes)
+    headers = _make_webhook_headers(body_bytes, secret=registered_runner.secret)
     headers["X-Kloc-Hook-Event"] = "BeforeToolCall"
 
     resp = await asgi_client.post(
@@ -212,7 +212,7 @@ async def test_webhook_deny_path_returns_deny_decision_and_audit(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_webhook_allow_path_returns_allow_decision_and_audit(
-    asgi_client, db_session, truncate_all_tables, deny_tools
+    asgi_client, db_session, truncate_all_tables, deny_tools, registered_runner
 ):
     """Same body as deny test but with empty KLOC_DENY_TOOLS →
     decision=allow + audit event=tool_call.started."""
@@ -229,7 +229,7 @@ async def test_webhook_allow_path_returns_allow_decision_and_audit(
     create = await asgi_client.post("/v1/sessions", json={})
     session_id = uuid.UUID(create.json()["session_id"])
 
-    runner_id = "r-allow-1"
+    runner_id = registered_runner.runner_id
     body_dict = _before_tool_call_body(
         session_id=session_id,
         runner_id=runner_id,
@@ -237,7 +237,7 @@ async def test_webhook_allow_path_returns_allow_decision_and_audit(
         tool_name="kloc_source",
     )
     body_bytes = json.dumps(body_dict).encode()
-    headers = _make_webhook_headers(body_bytes)
+    headers = _make_webhook_headers(body_bytes, secret=registered_runner.secret)
     headers["X-Kloc-Hook-Event"] = "BeforeToolCall"
 
     resp = await asgi_client.post(
@@ -264,7 +264,7 @@ async def test_webhook_allow_path_returns_allow_decision_and_audit(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_webhook_deny_only_targets_listed_tool(
-    asgi_client, db_session, truncate_all_tables, deny_tools
+    asgi_client, db_session, truncate_all_tables, deny_tools, registered_runner
 ):
     """KLOC_DENY_TOOLS=kloc_source: a BeforeToolCall for kloc_search still
     returns allow + tool_call.started audit. Proves the deny list is a
@@ -282,7 +282,7 @@ async def test_webhook_deny_only_targets_listed_tool(
     create = await asgi_client.post("/v1/sessions", json={})
     session_id = uuid.UUID(create.json()["session_id"])
 
-    runner_id = "r-mixed-1"
+    runner_id = registered_runner.runner_id
     body_dict = _before_tool_call_body(
         session_id=session_id,
         runner_id=runner_id,
@@ -290,7 +290,7 @@ async def test_webhook_deny_only_targets_listed_tool(
         tool_name="kloc_search",  # NOT in deny list
     )
     body_bytes = json.dumps(body_dict).encode()
-    headers = _make_webhook_headers(body_bytes)
+    headers = _make_webhook_headers(body_bytes, secret=registered_runner.secret)
     headers["X-Kloc-Hook-Event"] = "BeforeToolCall"
 
     resp = await asgi_client.post(
