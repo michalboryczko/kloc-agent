@@ -108,19 +108,9 @@ services:
       RUNNER_IMAGE_TAG: ${RUNNER_IMAGE_TAG:-kloc-agent-runner:dev}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       BACKEND_URL: http://backend:8000
       KLOC_HOOK_SECRET: ${KLOC_HOOK_SECRET:-dev-secret-please-rotate}
       KLOC_DENY_TOOLS: ${KLOC_DENY_TOOLS:-}
-      # Dev compose accepts the bootstrap secret for runner_ids missing
-      # from the registry so e2e tests that simulate webhook posts can
-      # sign with `KLOC_HOOK_SECRET`. Production deployments override to
-      # `false` via `ALLOW_HMAC_FALLBACK=false` and rely on per-runner
-      # secrets only.
-      ALLOW_HMAC_FALLBACK: ${ALLOW_HMAC_FALLBACK:-true}
-      KLOC_STUB_MODE: ${KLOC_STUB_MODE:-true}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-kloc-agent}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-console}

@@ -35,23 +35,18 @@ import pytest_asyncio
 
 
 @pytest.fixture(scope="session")
-def anthropic_api_key() -> str:
-    """Yield an LLM API key for the backend's configured provider, or skip.
+def llm_api_key() -> str:
+    """Yield `GEMINI_API_KEY` or skip the test.
 
-    The fixture name is `anthropic_api_key` for historical reasons (spec
-    originally pinned AnthropicModel). The PoC deployment uses Gemini per
-    team-lead deviation note; accept either `ANTHROPIC_API_KEY` or
-    `GEMINI_API_KEY`. The backend's `LLM_PROVIDER` setting decides which
-    one it actually uses — this fixture's only job is to gate e2e tests
-    that need a live LLM behind ANY key being set.
+    Gemini is the only supported provider; e2e tests that need a live
+    LLM gate on the key being set so unconfigured environments skip
+    cleanly instead of hard-failing.
     """
-    for env in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
-        key = os.environ.get(env)
-        if key:
-            return key
+    key = os.environ.get("GEMINI_API_KEY")
+    if key:
+        return key
     pytest.skip(
-        "no LLM API key set (ANTHROPIC_API_KEY or GEMINI_API_KEY) — "
-        "e2e tests require real LLM access"
+        "GEMINI_API_KEY not set — e2e tests require real LLM access"
     )
 
 

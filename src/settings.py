@@ -13,7 +13,7 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
-LlmProvider = Literal["anthropic", "openrouter", "bedrock", "gemini"]
+LlmProvider = Literal["gemini"]
 
 
 class Settings(BaseSettings):
@@ -56,21 +56,16 @@ class Settings(BaseSettings):
     kloc_skills_dir_host: str = "./skills"
 
     llm_provider: LlmProvider = "gemini"
-    anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
 
-    # Empty string sentinel is replaced with a provider-appropriate
-    # default inside `_validate_provider_key`, so consumers can rely on
+    # Empty string sentinel is replaced with `"gemini-3.1-pro-preview"`
+    # inside `_validate_provider_key`, so consumers can rely on
     # `settings.llm_model_id` being a non-empty `str` after construction.
-    # The annotation is `str` (not `str | None`) so type-checkers do not
-    # demand redundant None-guards at every call site.
     llm_model_id: str = Field(
         default="",
         description=(
             "Concrete model identifier passed into HydrationPayload. "
-            "Defaults to a provider-appropriate model when unset "
-            "(`gemini-3.1-pro-preview` for gemini, "
-            "`claude-3-5-haiku-20241022` for anthropic)."
+            "Defaults to `gemini-3.1-pro-preview` when unset."
         ),
     )
 
@@ -158,21 +153,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_provider_key(self) -> "Settings":
-        # Validate at boot, not first LLM call. Empty string was accepted
-        # silently before — now we require the key for the configured provider.
-        # Allow missing in stub mode (tests / CI) — checked at runtime.
-        if not self.stub_mode:
-            if self.llm_provider == "anthropic" and not self.anthropic_api_key:
-                raise ValueError(
-                    "ANTHROPIC_API_KEY required when llm_provider=anthropic "
-                    "(or set KLOC_STUB_MODE=true)"
-                )
-            if self.llm_provider == "gemini" and not self.gemini_api_key:
-                raise ValueError(
-                    "GEMINI_API_KEY required when llm_provider=gemini "
-                    "(or set KLOC_STUB_MODE=true)"
-                )
-        # openrouter / bedrock: no key field on Settings yet — leave alone.
+        # Validate at boot, not first LLM call. Stub mode (tests / CI)
+        # skips so suites can construct Settings without a real key.
+        if not self.stub_mode and not self.gemini_api_key:
+            raise ValueError(
+                "GEMINI_API_KEY required (or set KLOC_STUB_MODE=true)"
+            )
 
         # Opting into HMAC fallback while still using the placeholder
         # bootstrap secret means any caller who learned the well-known string
@@ -191,18 +177,8 @@ class Settings(BaseSettings):
                 "non-default value, or set KLOC_STUB_MODE=true for test runs."
             )
 
-        # Resolve provider-aware default model_id when the operator left it
-        # unset. Done here (not via a `Field(default_factory=...)`) because
-        # the default depends on a *sibling* field (`llm_provider`), which
-        # is only available after model construction.
         if not self.llm_model_id:
-            object.__setattr__(
-                self,
-                "llm_model_id",
-                "gemini-3.1-pro-preview"
-                if self.llm_provider == "gemini"
-                else "claude-3-5-haiku-20241022",
-            )
+            object.__setattr__(self, "llm_model_id", "gemini-3.1-pro-preview")
         return self
 
 

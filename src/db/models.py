@@ -313,11 +313,8 @@ class HydrationPayload(BaseModel):
     # Agent construction
     system_prompt: str
     model_id: str
-    # Runner-side `model_factory` selects the concrete model class. All
-    # four are wired paths: `anthropic` → AnthropicModel ([anthropic] extras);
-    # `gemini` → GeminiModel ([gemini] extras, operator default after the
-    # Gemini pivot); `openrouter` + `bedrock` are stubbed for now.
-    llm_provider: Literal["anthropic", "openrouter", "bedrock", "gemini"]
+    # Runner-side `model_factory.create_model` only wires gemini.
+    llm_provider: Literal["gemini"]
     prior_messages: list[dict[str, Any]]
     state: dict[str, Any] = Field(default_factory=dict)
 

@@ -42,7 +42,7 @@
 - `pydantic>=2.9` + `pydantic-settings>=2.6` — data validation and settings management (`src/settings.py`)
 - `sqlalchemy>=2.0` with asyncpg — async ORM; models in `src/db/models.py`
 - `alembic>=1.14` — database migrations; config at `alembic.ini`, migrations at `migrations/`
-- `strands-agents[anthropic,gemini]==1.39.0` — AWS Strands AI agent SDK; used in runner (`runner/agent_factory.py`, `runner/model_factory.py`)
+- `strands-agents[gemini]==1.39.0` — AWS Strands AI agent SDK; used in runner (`runner/agent_factory.py`, `runner/model_factory.py`)
 - `ag-ui-protocol==0.1.18` — AG-UI wire protocol for agent streaming events
 - `ag_ui_strands==0.1.8` — Strands adapter for AG-UI; wraps agent in `StrandsAgent`
 - `mcp>=1.2,<2` — Model Context Protocol client SDK; used in `runner/mcp_clients.py`
@@ -57,7 +57,7 @@
 - `hatchling` — Python wheel build backend
 - `opentelemetry-distro[otlp]` + OTel instrumentation packages — auto-instrumentation for FastAPI, httpx, SQLAlchemy, asyncpg, logging
 ## Key Dependencies
-- `strands-agents[anthropic,gemini]==1.39.0` — core AI agent orchestration; pinned exactly; installed from PyPI with `[anthropic]` and `[gemini]` extras
+- `strands-agents[gemini]==1.39.0` — core AI agent orchestration; pinned exactly; installed from PyPI with the `[gemini]` extra
 - `strands_agentskills` — installed from a git SHA (`aws-samples/sample-strands-agents-agentskills@c5564fcd`) for skill discovery; not on PyPI; `hatch.metadata.allow-direct-references = true` required
 - `ag-ui-protocol==0.1.18` — pinned; defines the wire format shared between backend and runner
 - `ag_ui_strands==0.1.8` — pinned; bridges Strands agent to AG-UI event stream
@@ -69,10 +69,8 @@
 ## Configuration
 - `DATABASE_URL` — asyncpg connection string; default `postgresql+asyncpg://kloc:changeme@localhost:5432/kloc_agent`
 - `MINIO_ENDPOINT_URL`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_USE_SSL`, `ARTIFACT_BUCKET` — S3/MinIO storage
-- `LLM_PROVIDER` — `gemini` (default) or `anthropic`
-- `GEMINI_API_KEY` — required when `LLM_PROVIDER=gemini`
-- `ANTHROPIC_API_KEY` — required when `LLM_PROVIDER=anthropic`
-- `ANTHROPIC_BASE_URL` — optional proxy override
+- `LLM_PROVIDER` — `gemini` (only supported value)
+- `GEMINI_API_KEY` — required at boot unless `KLOC_STUB_MODE=true`
 - `RUNNER_IMAGE_TAG`, `RUNNER_WARM_IDLE_S`, `RUNNER_HEARTBEAT_TIMEOUT_S` — runner lifecycle
 - `KLOC_RUNNER_MODE` — `docker` (default) or `stub` (CI/no-docker mode)
 - `KLOC_MCP_URL` — Streamable-HTTP MCP endpoint for kloc-intelligence

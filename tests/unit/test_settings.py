@@ -3,7 +3,7 @@
 Regressions covered:
 - `get_settings()` was a non-thread-safe module-level singleton; fixed
   to use `functools.lru_cache`. Two calls must return the same instance.
-- `anthropic_api_key` / `gemini_api_key` defaulted to `""` so empty
+- `gemini_api_key` defaulted to `""` so empty
   config wasn't caught at boot. Fixed to default to `None`.
 """
 from __future__ import annotations
@@ -21,99 +21,43 @@ def test_get_settings_returns_same_instance() -> None:
     assert a is b
 
 
-def test_api_keys_default_to_none(monkeypatch, tmp_path) -> None:
+def test_gemini_api_key_defaults_to_none(monkeypatch, tmp_path) -> None:
     from src.settings import Settings
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    # Default llm_provider is "gemini"; without stub mode the new boot-time
-    # validator would refuse to construct. Tests/CI set KLOC_STUB_MODE=true.
+    # Without stub mode the boot-time validator refuses to construct
+    # when GEMINI_API_KEY is missing.
     monkeypatch.setenv("KLOC_STUB_MODE", "true")
     monkeypatch.chdir(tmp_path)
 
     s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.anthropic_api_key is None
     assert s.gemini_api_key is None
 
 
-def test_missing_anthropic_key_raises_when_not_stub(monkeypatch, tmp_path) -> None:
+def test_missing_gemini_key_raises_when_not_stub(monkeypatch, tmp_path) -> None:
     from pydantic import ValidationError
 
     from src.settings import Settings
 
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
+    monkeypatch.delenv("ALLOW_HMAC_FALLBACK", raising=False)
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises((ValidationError, ValueError)):
         Settings(_env_file=None)  # type: ignore[call-arg]
 
 
-def test_missing_anthropic_key_allowed_when_stub(monkeypatch, tmp_path) -> None:
+def test_missing_gemini_key_allowed_when_stub(monkeypatch, tmp_path) -> None:
     from src.settings import Settings
 
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("KLOC_STUB_MODE", "true")
     monkeypatch.chdir(tmp_path)
 
     s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.anthropic_api_key is None
+    assert s.gemini_api_key is None
     assert s.stub_mode is True
-
-
-def test_openrouter_provider_does_not_require_key(
-    monkeypatch, tmp_path
-) -> None:
-    """`openrouter` has no key field on Settings; the validator must
-    accept it cleanly even when stub_mode is off and no provider key
-    is set. Pins the 'leave alone' branch of `_validate_provider_key`."""
-    from src.settings import Settings
-
-    monkeypatch.setenv("LLM_PROVIDER", "openrouter")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
-    monkeypatch.delenv("ALLOW_HMAC_FALLBACK", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.llm_provider == "openrouter"
-    assert s.stub_mode is False
-
-
-def test_bedrock_provider_does_not_require_key(
-    monkeypatch, tmp_path
-) -> None:
-    """Same contract as openrouter for `bedrock`: no key field on
-    Settings, so the validator must pass without complaint."""
-    from src.settings import Settings
-
-    monkeypatch.setenv("LLM_PROVIDER", "bedrock")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
-    monkeypatch.delenv("ALLOW_HMAC_FALLBACK", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.llm_provider == "bedrock"
-    assert s.stub_mode is False
-
-
-def test_gemini_branch_enforced(monkeypatch, tmp_path) -> None:
-    from pydantic import ValidationError
-
-    from src.settings import Settings
-
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("KLOC_STUB_MODE", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    with pytest.raises((ValidationError, ValueError)):
-        Settings(_env_file=None)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -133,20 +77,6 @@ def test_llm_model_id_defaults_to_gemini_model_when_provider_gemini(
 
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.llm_model_id == "gemini-3.1-pro-preview"
-
-
-def test_llm_model_id_defaults_to_anthropic_model_when_provider_anthropic(
-    monkeypatch, tmp_path
-) -> None:
-    from src.settings import Settings
-
-    monkeypatch.setenv("KLOC_STUB_MODE", "true")
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    monkeypatch.delenv("LLM_MODEL_ID", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.llm_model_id == "claude-3-5-haiku-20241022"
 
 
 def test_llm_model_id_env_override_wins(monkeypatch, tmp_path) -> None:
@@ -169,14 +99,14 @@ def test_stream_call_site_uses_settings_only(monkeypatch, tmp_path) -> None:
     from src.settings import Settings
 
     monkeypatch.setenv("KLOC_STUB_MODE", "true")
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.delenv("LLM_MODEL_ID", raising=False)
     monkeypatch.chdir(tmp_path)
 
     s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.llm_provider == "anthropic"
-    assert s.llm_model_id == "claude-3-5-haiku-20241022"
+    assert s.llm_provider == "gemini"
+    assert s.llm_model_id == "gemini-3.1-pro-preview"
 
 
 # ---------------------------------------------------------------------------
@@ -372,9 +302,14 @@ def test_stale_kloc_runner_mode_env_var_is_ignored(
 
 def test_env_example_has_no_kloc_runner_mode_entry() -> None:
     # ISS-12: .env.example must no longer document the removed field.
+    # Docs check, not a runtime check — skip cleanly when the file is
+    # not next to the source (e.g., test runs inside a slim runtime
+    # container that omits dev artifacts).
     from pathlib import Path
 
     env_example = Path(__file__).resolve().parents[2] / ".env.example"
+    if not env_example.is_file():
+        pytest.skip(f".env.example not found at {env_example}")
     text = env_example.read_text()
     assert "KLOC_RUNNER_MODE" not in text
 

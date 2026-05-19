@@ -1,0 +1,22 @@
+# Test-mode override for the kloc-agent compose stack.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d backend
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml exec backend pytest
+#
+# Why this exists: the production HMAC webhook path is strict — it
+# rejects requests for runner_ids missing from `RunnerRegistry` with 401
+# before HMAC verification runs. Tests that simulate webhook posts (no
+# real runner) cannot know a per-runner secret to sign with, so the
+# test stack flips `ALLOW_HMAC_FALLBACK=true` to accept the bootstrap
+# secret for unknown runner_ids. `KLOC_STUB_MODE=true` is paired so the
+# Settings safety validator does not refuse to boot on the default
+# bootstrap secret.
+#
+# The base `docker-compose.yml` keeps production defaults (strict HMAC,
+# no stub mode). Production deployments NEVER load this file.
+services:
+  backend:
+    environment:
+      ALLOW_HMAC_FALLBACK: "true"
+      KLOC_STUB_MODE: "true"

@@ -33,7 +33,7 @@ R3_THRESHOLD_BYTES = 1 * 1024 * 1024  # 1 MB
 
 @pytest.mark.asyncio
 async def test_scenario_09_messages_snapshot_cardinality(
-    anthropic_api_key,
+    llm_api_key,
     kloc_intelligence_path,
     sot_json_fixture,
     compose_stack,

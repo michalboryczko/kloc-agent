@@ -321,7 +321,7 @@ async def test_webhook_deny_only_targets_listed_tool(
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_scenario_06_hook_deny_path(
-    anthropic_api_key,
+    llm_api_key,
     kloc_intelligence_path,
     sot_json_fixture,
     compose_stack,

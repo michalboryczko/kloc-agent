@@ -111,16 +111,9 @@ class DockerRunner(Runner):
             f"KLOC_BACKEND_URL={self._backend_url}",
             f"KLOC_HYDRATION_PATH={runner_hydration_path}",
         ]
-        # Forward LLM provider credentials unconditionally; the runner's
-        # `create_model` picks the matching one per `LLM_PROVIDER`.
-        # GEMINI_API_KEY / GOOGLE_API_KEY are both forwarded because
-        # google-genai accepts either name.
-        for key in (
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_BASE_URL",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-        ):
+        # Forward Gemini credentials. GEMINI_API_KEY / GOOGLE_API_KEY are
+        # both forwarded because google-genai accepts either name.
+        for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
             value = os.environ.get(key)
             if value:
                 env_block.append(f"{key}={value}")

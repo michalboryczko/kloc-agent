@@ -19,13 +19,10 @@ dependencies = [
     "pydantic-settings>=2.6",
     "httpx>=0.27",
     "python-multipart>=0.0.12",
-    # Runner + Strands stack (dev-2 bundled change-request).
-    # B-INFRA-6: `[anthropic]` extras pull the `anthropic` SDK client
-    # that `strands.models.anthropic.AnthropicModel` imports at module
-    # load. Operator Gemini pivot: `[gemini]` extras pull `google-genai`
-    # for `strands.models.gemini.GeminiModel`. Both kept — runner-side
-    # `model_factory` chooses by the `LLM_PROVIDER` env at spawn.
-    "strands-agents[anthropic,gemini]==1.39.0",
+    # `[gemini]` extras pull `google-genai` for
+    # `strands.models.gemini.GeminiModel` — the only model wired in
+    # `runner/model_factory.py`.
+    "strands-agents[gemini]==1.39.0",
     "ag-ui-protocol==0.1.18",
     "ag_ui_strands==0.1.8",
     "strands_agentskills @ git+https://github.com/aws-samples/sample-strands-agents-agentskills@c5564fcd2e7c249ec57b32027ffbea49e9abeb7b",

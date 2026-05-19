@@ -4,8 +4,8 @@
   "runner_id": "00000000-0000-0000-0000-0000000001b2",
   "runner_secret": "dGVzdC1ydW5uZXItc2VjcmV0LWRvLW5vdC11c2UtaW4tcHJvZA==",
   "system_prompt": "You are a code-intelligence analyst. Use kloc MCP tools to look things up, then call the `summarizer` sub-agent for the final response.\n\n<available_skills>\n- summarize-callgraph: Use when the user asks to summarise a call graph.\n</available_skills>",
-  "model_id": "claude-sonnet-4-6",
-  "llm_provider": "anthropic",
+  "model_id": "gemini-3.1-pro-preview",
+  "llm_provider": "gemini",
   "prior_messages": [],
   "state": {},
   "mcp_endpoints": [

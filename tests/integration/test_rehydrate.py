@@ -34,8 +34,8 @@ def _make_payload(session_id: str, prior_messages: list[dict]) -> HydrationPaylo
         runner_id=str(uuid.uuid4()),
         runner_secret="test-secret-no-prod",
         system_prompt="You are a test agent.",
-        model_id="claude-sonnet-4-6",
-        llm_provider="anthropic",
+        model_id="gemini-3.1-pro-preview",
+        llm_provider="gemini",
         prior_messages=prior_messages,
         state={},
         mcp_endpoints=[
@@ -168,10 +168,10 @@ def test_build_skills_mount_is_readonly_named_volume():
 def test_hydration_payload_sample_fixture_parses(hydration_payload_sample):
     """The shared JSON fixture round-trips through HydrationPayload."""
     parsed = HydrationPayload.model_validate(hydration_payload_sample)
-    assert parsed.llm_provider == "anthropic"
+    assert parsed.llm_provider == "gemini"
     assert parsed.skills_dir == "/skills"
     assert parsed.mcp_endpoints[0].command == "uv"
-    assert parsed.model_id == "claude-sonnet-4-6"
+    assert parsed.model_id == "gemini-3.1-pro-preview"
 
 
 def test_hydration_payload_rejects_invalid_llm_provider():
