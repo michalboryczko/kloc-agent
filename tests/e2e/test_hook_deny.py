@@ -72,26 +72,26 @@ def _before_tool_call_body(
 
 
 # ---------------------------------------------------------------------------
-# Settings-singleton reset helper. `get_settings()` lru-caches a module-level
-# `_settings`. The deny-path tests need to flip `KLOC_DENY_TOOLS` per-test;
-# we monkeypatch the env and clear the cache so the next call re-reads.
+# Settings-singleton reset helper. `get_settings()` is decorated with
+# `@lru_cache(maxsize=1)`; flipping `KLOC_DENY_TOOLS` per-test requires
+# clearing that cache (not assigning a non-existent `_settings` attribute).
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def deny_tools(monkeypatch):
-    """Yield a setter; clears Settings cache before AND after."""
+    """Yield a setter; clears the get_settings lru_cache before AND after."""
 
     def _set(value: str) -> None:
         monkeypatch.setenv("KLOC_DENY_TOOLS", value)
-        settings_mod._settings = None  # force re-read on next get_settings()
+        settings_mod.get_settings.cache_clear()
 
     monkeypatch.setenv("KLOC_DENY_TOOLS", "")
-    settings_mod._settings = None
+    settings_mod.get_settings.cache_clear()
     try:
         yield _set
     finally:
-        settings_mod._settings = None
+        settings_mod.get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
