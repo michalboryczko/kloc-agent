@@ -95,7 +95,7 @@ async def delete_message(
     conn = await asyncpg.connect(pg_dsn)
     try:
         await conn.fetchrow(
-            "SELECT pgmq.delete($1, $2)", queue_name, msg_id
+            "SELECT pgmq.delete($1, $2::bigint)", queue_name, msg_id
         )
     finally:
         await conn.close()

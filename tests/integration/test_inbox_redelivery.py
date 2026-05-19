@@ -95,5 +95,6 @@ async def test_unacked_message_is_redelivered_to_next_consumer(
 
         await inbox_consumer.delete_message(pg_dsn, queue, second_msg_id)
     finally:
-        await drop_inbox_queue(conn, session_id)
+        cleanup_conn = await db_session.connection()
+        await drop_inbox_queue(cleanup_conn, session_id)
         await db_session.commit()

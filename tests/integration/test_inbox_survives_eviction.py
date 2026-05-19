@@ -98,6 +98,7 @@ async def test_pending_message_survives_runner_eviction(
         )
         await db_session.commit()
 
+        conn = await db_session.connection()
         assert await _pending_count(conn, queue) == 1
 
         await first_entry.warm_idle._on_evict()  # type: ignore[attr-defined]
@@ -142,8 +143,10 @@ async def test_pending_message_survives_runner_eviction(
             {"role": "user", "content": "second turn"}
         ]
         await inbox_consumer.delete_message(pg_dsn, queue, msg_id)
+        conn = await db_session.connection()
         assert await _pending_count(conn, queue) == 0
     finally:
         await registry.shutdown_all()
-        await drop_inbox_queue(conn, session_id)
+        cleanup_conn = await db_session.connection()
+        await drop_inbox_queue(cleanup_conn, session_id)
         await db_session.commit()

@@ -51,12 +51,13 @@ async def ensure_extension(conn: Any) -> None:
 async def ensure_inbox_queue(conn: Any, session_id: str) -> str:
     """Create the per-session inbox queue if missing; return its name.
 
-    `pgmq.create_queue` is idempotent — calling it for an existing queue
-    is a no-op rather than an error.
+    `pgmq.create` is idempotent — calling it for an existing queue is a
+    no-op rather than an error. (PGMQ ≥ 1.0 renamed `create_queue` to
+    `create`; the Tembo `pg16-pgmq:latest` image ships 1.5.x.)
     """
     queue = inbox_queue_name(session_id)
     await conn.execute(
-        text("SELECT pgmq.create_queue(:q)"), {"q": queue}
+        text("SELECT pgmq.create(:q)"), {"q": queue}
     )
     return queue
 

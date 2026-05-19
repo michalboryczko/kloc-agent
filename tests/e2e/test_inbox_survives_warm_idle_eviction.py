@@ -100,6 +100,7 @@ async def test_pending_message_survives_warm_idle_timer_eviction(
             [{"role": "user", "content": "pending across timer eviction"}],
         )
         await db_session.commit()
+        conn = await db_session.connection()
         assert await _pending_count(conn, queue) == 1
 
         first_entry.warm_idle.on_run_finished()
@@ -141,8 +142,10 @@ async def test_pending_message_survives_warm_idle_timer_eviction(
         assert payload["type"] == "user_message"
         assert payload["run_id"] == run_id
         await inbox_consumer.delete_message(pg_dsn, queue, msg_id)
+        conn = await db_session.connection()
         assert await _pending_count(conn, queue) == 0
     finally:
         await registry.shutdown_all()
-        await drop_inbox_queue(conn, session_id)
+        cleanup_conn = await db_session.connection()
+        await drop_inbox_queue(cleanup_conn, session_id)
         await db_session.commit()
