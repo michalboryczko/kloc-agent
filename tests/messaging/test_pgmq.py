@@ -3,7 +3,8 @@
 Pure-Python tests of `inbox_queue_name` are marked `unit`; tests that
 exercise `ensure_extension`, `ensure_inbox_queue`, `send_user_message`,
 and `drop_inbox_queue` against a real pgmq-enabled Postgres are marked
-`integration` and skip when Postgres is unreachable (via `db_session`).
+`integration`. They skip when Postgres is unreachable (via `db_session`)
+or when the pgmq extension is not installed on the test instance.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text as _text
+from sqlalchemy.exc import DBAPIError
 
 from src.messaging.pgmq import (
     drop_inbox_queue,
@@ -24,6 +26,15 @@ from src.messaging.pgmq import (
 
 def _new_session_id() -> str:
     return str(uuid.uuid4())
+
+
+async def _ensure_pgmq_or_skip(conn) -> None:
+    try:
+        await ensure_extension(conn)
+    except DBAPIError as exc:
+        if "pgmq" in str(exc).lower():
+            pytest.skip(f"pgmq extension unavailable on test Postgres: {exc}")
+        raise
 
 
 @pytest.mark.unit
@@ -52,7 +63,7 @@ def test_inbox_queue_name_rejects_invalid_session_id() -> None:
 @pytest.mark.integration
 async def test_ensure_extension_is_idempotent(db_session) -> None:
     conn = await db_session.connection()
-    await ensure_extension(conn)
+    await _ensure_pgmq_or_skip(conn)
     await ensure_extension(conn)
     result = await conn.execute(
         _text("SELECT 1 FROM pg_extension WHERE extname = 'pgmq'")
@@ -63,7 +74,7 @@ async def test_ensure_extension_is_idempotent(db_session) -> None:
 @pytest.mark.integration
 async def test_ensure_inbox_queue_is_idempotent(db_session) -> None:
     conn = await db_session.connection()
-    await ensure_extension(conn)
+    await _ensure_pgmq_or_skip(conn)
     sid = _new_session_id()
     queue = await ensure_inbox_queue(conn, sid)
     assert queue == inbox_queue_name(sid)
@@ -75,7 +86,7 @@ async def test_ensure_inbox_queue_is_idempotent(db_session) -> None:
 @pytest.mark.integration
 async def test_send_user_message_round_trip_via_pgmq_read(db_session) -> None:
     conn = await db_session.connection()
-    await ensure_extension(conn)
+    await _ensure_pgmq_or_skip(conn)
     sid = _new_session_id()
     await ensure_inbox_queue(conn, sid)
     try:
@@ -107,7 +118,7 @@ async def test_send_user_message_round_trip_via_pgmq_read(db_session) -> None:
 @pytest.mark.integration
 async def test_drop_inbox_queue_removes_queue(db_session) -> None:
     conn = await db_session.connection()
-    await ensure_extension(conn)
+    await _ensure_pgmq_or_skip(conn)
     sid = _new_session_id()
     await ensure_inbox_queue(conn, sid)
 
