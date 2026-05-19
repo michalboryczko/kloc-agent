@@ -1,11 +1,15 @@
 services:
 
   postgres:
-    image: postgres:16-alpine
+    image: quay.io/tembo/pg16-pgmq:latest
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-kloc}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       POSTGRES_DB: ${POSTGRES_DB:-kloc_agent}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pgmq,pg_stat_statements
     ports:
       - "5432:5432"
     volumes:

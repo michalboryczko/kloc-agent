@@ -2,6 +2,7 @@
 
 Lifespan order:
   1. Create DB engine (sqlalchemy async)
+  1a. Load PGMQ extension (CREATE EXTENSION IF NOT EXISTS pgmq)
   2. Create S3 client (aioboto3) on `app.state.s3`
   3. Initialize `RunnerRegistry` + `DockerRunner`
   4. Run boot-time orphan-container sweep
@@ -21,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api import artifacts, health, internal, sessions, stop, stream, webhooks
 from src.db.engine import create_engine_for_settings, get_sessionmaker
 from src.hooks_audit.emit import make_audit_emit_closure
+from src.messaging.pgmq import ensure_extension
 from src.runner_mgmt import RunnerRegistry
 from src.settings import get_settings
 from src.streaming.event_bus import event_bus
@@ -40,6 +42,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 1. DB engine
     engine = create_engine_for_settings(settings)
     app.state.engine = engine
+
+    # 1a. Load PGMQ extension. Idempotent CREATE EXTENSION; required
+    #     before any inbox queue can be created. Boot fails loudly if
+    #     the postgres image does not bundle pgmq.
+    async with engine.begin() as conn:
+        await ensure_extension(conn)
+    logger.info("pgmq extension ready")
 
     # 2. S3 client (lifespan-managed so credentials/connection are
     #    created once at boot, not per-request).
