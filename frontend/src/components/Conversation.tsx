@@ -3,6 +3,7 @@
 import { useRunLoop } from "@/lib/runLoop";
 import type { MessagesPage, SessionDetail } from "@/lib/types";
 import { ConnectionBanner } from "./ConnectionBanner";
+import { ConversationHeader } from "./ConversationHeader";
 import { InputBar } from "./InputBar";
 import { Thread } from "./Thread";
 
@@ -30,6 +31,12 @@ export function Conversation({
 
   return (
     <>
+      <ConversationHeader
+        title={state.detail?.title ?? initialDetail.title}
+        sessionId={initialDetail.id}
+        messageCount={state.messages.length}
+        closed={closed}
+      />
       <ConnectionBanner
         state={state.connection}
         errorMessage={state.errorMessage}

@@ -430,7 +430,9 @@ async def _build_hydration_payload(
         skills_dir="/skills",
         backend_url=settings.backend_url,
         heartbeat_interval_s=15,
-        pg_dsn=settings.database_url,
+        pg_dsn=settings.database_url.replace(
+            "postgresql+asyncpg://", "postgresql://", 1
+        ),
         inbox_queue=inbox_queue_name(session_id),
     )
 

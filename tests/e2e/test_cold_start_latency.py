@@ -35,8 +35,7 @@ P95_BUDGET_S = 10.0
 @pytest.mark.asyncio
 async def test_scenario_10_cold_start_latency(
     llm_api_key,
-    kloc_intelligence_path,
-    sot_json_fixture,
+    mcp_reachable,
     compose_stack,
     async_http_client,
     sse_helpers,

@@ -30,8 +30,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.slow]
 @pytest.mark.asyncio
 async def test_scenario_04_same_chat_rehydrate_after_eviction(
     llm_api_key,
-    kloc_intelligence_path,
-    sot_json_fixture,
+    mcp_reachable,
     compose_stack,
     async_http_client,
     sse_helpers,

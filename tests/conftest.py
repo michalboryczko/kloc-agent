@@ -1,20 +1,3 @@
-"""Shared pytest configuration and fixtures for the kloc-agent test suite.
-
-Conventions (see `.claude/qa-notes/kloc-agent-poc_qa_ref_note.md` §2):
-
-- `unit` tests: no IO, no network.
-- `integration` tests: real Postgres + in-process backend; mocked Runner + LLM + MCP.
-- `e2e` tests: full compose stack + real Anthropic + real Docker runner.
-
-Real fixtures (dev-1 + dev-2 shipped):
-- `db_session` — async SQLAlchemy session bound to the test DB
-- `truncate_all_tables` — clears all 4 tables between tests
-- `mock_runner` — observable Runner Protocol impl
-- `app_in_process` + `asgi_client` — drive the FastAPI app in-process
-
-Still stubs:
-- `mock_model_provider`, `mock_tools` — only needed for unit tests of runner/agent_factory
-"""
 from __future__ import annotations
 
 import asyncio
@@ -29,115 +12,58 @@ import pytest
 import pytest_asyncio
 
 
-# ---------------------------------------------------------------------------
-# Environment / discovery fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(scope="session")
 def llm_api_key() -> str:
-    """Yield `GEMINI_API_KEY` or skip the test.
-
-    Gemini is the only supported provider; e2e tests that need a live
-    LLM gate on the key being set so unconfigured environments skip
-    cleanly instead of hard-failing.
-    """
     key = os.environ.get("GEMINI_API_KEY")
-    if key:
-        return key
-    pytest.skip(
-        "GEMINI_API_KEY not set — e2e tests require real LLM access"
-    )
+    if not key:
+        pytest.skip("GEMINI_API_KEY not set")
+    return key
 
 
 @pytest.fixture(scope="session")
-def kloc_intelligence_path() -> Path:
-    """Path to the local checkout of kloc-intelligence (MCP server source).
+def mcp_reachable() -> str:
+    import urllib.error
+    import urllib.request
 
-    Set `KLOC_INTELLIGENCE_PATH` to override; tests skip when unset to
-    avoid being tied to one developer's filesystem layout."""
-    raw = os.environ.get("KLOC_INTELLIGENCE_PATH")
-    if not raw:
-        pytest.skip(
-            "KLOC_INTELLIGENCE_PATH unset — point it at a local "
-            "kloc-intelligence checkout to run this test"
-        )
-    p = Path(raw)
-    if not p.is_dir():
-        pytest.skip(f"kloc-intelligence not found at {p}")
-    return p
-
-
-@pytest.fixture(scope="session")
-def sot_json_fixture() -> Path:
-    """Small sot.json fixture for the MCP to load.
-
-    Set `SOT_JSON_FIXTURE` to a generated sot.json. Tests skip when
-    unset rather than depending on developer-machine layouts.
-    """
-    raw = os.environ.get("SOT_JSON_FIXTURE")
-    if not raw:
-        pytest.skip(
-            "SOT_JSON_FIXTURE unset — point it at a generated sot.json "
-            "to run tests that need a code-graph fixture"
-        )
-    p = Path(raw)
-    if not p.is_file():
-        pytest.skip(f"sot.json not found at {p}")
-    return p
+    url = os.environ["KLOC_MCP_URL"]
+    try:
+        urllib.request.urlopen(url, timeout=2)
+    except urllib.error.HTTPError:
+        pass
+    except (urllib.error.URLError, OSError) as exc:
+        pytest.skip(f"MCP unreachable at {url}: {exc}")
+    return url
 
 
 @pytest.fixture(scope="session")
 def backend_url() -> str:
-    """Base URL of the backend under test."""
-    return os.environ.get("BACKEND_URL", "http://localhost:8000")
+    return os.environ["BACKEND_URL"]
 
 
 @pytest.fixture(scope="session")
 def hydration_payload_sample() -> dict[str, Any]:
-    """Load the canonical `HydrationPayload` JSON fixture as a dict."""
     import json
 
     path = Path(__file__).parent / "fixtures" / "hydration_payload_sample.json"
     return json.loads(path.read_text())
 
 
-# ---------------------------------------------------------------------------
-# Compose stack lifecycle (e2e)
-# ---------------------------------------------------------------------------
-
-
-def _backend_healthy(url: str) -> bool:
+@pytest.fixture(scope="session")
+def compose_stack(backend_url: str) -> None:
     import urllib.error
     import urllib.request
 
     try:
-        with urllib.request.urlopen(f"{url}/healthz", timeout=2) as resp:
-            return 200 <= resp.status < 300
+        with urllib.request.urlopen(f"{backend_url}/healthz", timeout=2) as resp:
+            if 200 <= resp.status < 300:
+                return
     except (urllib.error.URLError, OSError):
-        return False
-
-
-@pytest.fixture(scope="session")
-def compose_stack(backend_url: str) -> None:
-    """Assert the compose stack is up; skip if not.
-
-    Does NOT bring it up — operator runs `make e2e-up`.
-    """
-    if not _backend_healthy(backend_url):
-        pytest.skip(
-            f"backend /healthz unreachable at {backend_url}; run `make e2e-up`"
-        )
-
-
-# ---------------------------------------------------------------------------
-# HTTP / SSE clients
-# ---------------------------------------------------------------------------
+        pass
+    pytest.skip(f"backend /healthz unreachable at {backend_url}")
 
 
 @pytest_asyncio.fixture
 async def async_http_client(backend_url: str) -> AsyncIterator[Any]:
-    """`httpx.AsyncClient` bound to the backend under test (over network)."""
     import httpx
 
     async with httpx.AsyncClient(
@@ -150,36 +76,17 @@ async def async_http_client(backend_url: str) -> AsyncIterator[Any]:
 
 @pytest.fixture
 def sse_helpers():
-    """Expose the AG-UI SSE helpers module."""
     from tests.fixtures import sse_client as _sse  # type: ignore[import-not-found]
 
     return _sse
 
 
-# ---------------------------------------------------------------------------
-# Database (real today — dev-1 shipped Track B)
-# ---------------------------------------------------------------------------
-
-
-def _test_database_url() -> str:
-    return (
-        os.environ.get("TEST_DATABASE_URL")
-        or os.environ.get("DATABASE_URL")
-        or "postgresql+asyncpg://kloc:changeme@localhost:5432/kloc_agent"
-    )
-
-
 @pytest_asyncio.fixture
 async def db_session() -> AsyncIterator[Any]:
-    """Async SQLAlchemy session bound to the test DB.
-
-    Skips the test if Postgres is unreachable so unit tests can still
-    run in CI without a DB.
-    """
     from sqlalchemy.exc import InterfaceError, OperationalError
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    url = _test_database_url()
+    url = os.environ["DATABASE_URL"]
     engine = create_async_engine(url, pool_pre_ping=True)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -191,17 +98,6 @@ async def db_session() -> AsyncIterator[Any]:
     except (OperationalError, InterfaceError, OSError) as exc:
         await engine.dispose()
         pytest.skip(f"Postgres unreachable at {url}: {exc}")
-    except ValueError as exc:
-        # SQLAlchemy raises ValueError from _not_implemented() when
-        # greenlet is missing — surface this as a skip with a clear
-        # remediation rather than letting it look like a test bug.
-        await engine.dispose()
-        if "greenlet" in str(exc).lower():
-            pytest.skip(
-                f"sqlalchemy async needs greenlet; add `greenlet>=3.0` "
-                f"to pyproject.toml dependencies (see QA report on this): {exc}"
-            )
-        raise
 
     try:
         async with factory() as session:
@@ -212,7 +108,6 @@ async def db_session() -> AsyncIterator[Any]:
 
 @pytest_asyncio.fixture
 async def truncate_all_tables(db_session) -> AsyncIterator[None]:
-    """TRUNCATE the 4 tables before AND after each test that requests it."""
     from sqlalchemy import text as _text
 
     async def _wipe() -> None:
@@ -231,60 +126,16 @@ async def truncate_all_tables(db_session) -> AsyncIterator[None]:
         await _wipe()
 
 
-# ---------------------------------------------------------------------------
-# Backend app for in-process integration tests
-# ---------------------------------------------------------------------------
-
-
 @pytest_asyncio.fixture
 async def app_in_process() -> AsyncIterator[Any]:
-    """Yield the FastAPI app with lifespan started.
-
-    Used by integration tests via httpx `ASGITransport`. Lifespan brings
-    up engine + S3 client + RunnerRegistry stub; tests that need S3 must
-    have MinIO reachable.
-
-    Skips the test cleanly when:
-    - `greenlet` is missing (surfaces as ValueError from SQLAlchemy
-      `_not_implemented`)
-    - Postgres / MinIO is unreachable (OperationalError / EndpointConnectionError)
-    - The PGMQ extension is not installed on the Postgres instance
-      (lifespan step 1a `ensure_extension` raises DBAPIError)
-    """
     from src.main import create_app
 
     app = create_app()
-    try:
-        async with _LifespanManager(app) as app_ctx:
-            yield app_ctx
-    except ValueError as exc:
-        if "greenlet" in str(exc).lower():
-            pytest.skip(
-                "sqlalchemy async needs greenlet; add `greenlet>=3.0` to "
-                "pyproject.toml dependencies"
-            )
-        raise
-    except Exception as exc:
-        msg = str(exc).lower()
-        if any(
-            tok in msg
-            for tok in (
-                "connection refused",
-                "could not connect",
-                "name or service not known",
-                "nodename nor servname provided",
-                "endpointconnectionerror",
-                "pgmq",
-                "extension",
-            )
-        ):
-            pytest.skip(f"backend dependency unreachable: {exc}")
-        raise
+    async with _LifespanManager(app) as app_ctx:
+        yield app_ctx
 
 
 class _LifespanManager:
-    """Minimal lifespan driver."""
-
     def __init__(self, app: Any) -> None:
         self._app = app
         self._lifespan_cm = None
@@ -301,7 +152,6 @@ class _LifespanManager:
 
 @pytest_asyncio.fixture
 async def asgi_client(app_in_process) -> AsyncIterator[Any]:
-    """httpx.AsyncClient bound to the in-process FastAPI app."""
     import httpx
 
     transport = httpx.ASGITransport(app=app_in_process)
@@ -315,15 +165,6 @@ async def asgi_client(app_in_process) -> AsyncIterator[Any]:
 
 
 class _RegisteredRunner:
-    """Test handle to a stub entry installed on `RunnerRegistry`.
-
-    Carries the `runner_id` and per-runner `secret` the webhook receiver
-    will resolve via `RunnerRegistry.get_by_runner_id`; the receiver's
-    strict mode rejects HMAC requests for unknown runner_ids, so e2e
-    webhook tests must pre-install an entry instead of signing with the
-    global bootstrap secret.
-    """
-
     def __init__(self, runner_id: str, secret: str, session_id: str) -> None:
         self.runner_id = runner_id
         self.secret = secret
@@ -332,20 +173,6 @@ class _RegisteredRunner:
 
 @pytest_asyncio.fixture
 async def registered_runner(app_in_process) -> AsyncIterator[_RegisteredRunner]:
-    """Install a stub RegistryEntry that the HMAC webhook receiver can
-    resolve via `RunnerRegistry.get_by_runner_id`.
-
-    Webhook tests run against the production strict-mode auth path: the
-    receiver looks up `runner_id` in the registry and HMAC-verifies with
-    the per-runner secret. Without a registered entry the receiver
-    refuses with 401 "unknown runner" before HMAC verification runs.
-
-    The stub bypasses `_install_entry` (which would start warm-idle and
-    heartbeat watchers) — we only need `entry.handle.runner_secret` for
-    the secret-resolution path and the runner_id -> session_id reverse
-    index. Cleanup pops the dicts before lifespan shutdown so
-    `shutdown_all` does not see a watcher-less entry.
-    """
     from types import SimpleNamespace
 
     runner_id = f"test-runner-{uuid.uuid4().hex[:8]}"
@@ -378,14 +205,7 @@ async def registered_runner(app_in_process) -> AsyncIterator[_RegisteredRunner]:
             registry._entries.pop(session_id, None)
 
 
-# ---------------------------------------------------------------------------
-# Runner Protocol fake (real today — dev-2 shipped the Protocol)
-# ---------------------------------------------------------------------------
-
-
 class FakeRunnerHandle:
-    """Observable handle matching the `RunnerHandle` Protocol."""
-
     def __init__(self, session_id: str, runner_id: str | None = None) -> None:
         self.session_id = session_id
         self.runner_id = runner_id or str(uuid.uuid4())
@@ -396,8 +216,6 @@ class FakeRunnerHandle:
 
 
 class FakeRunner:
-    """In-memory Runner Protocol impl. Records every call for assertion."""
-
     def __init__(
         self,
         outbound_events: list[dict] | None = None,
@@ -441,32 +259,20 @@ class FakeRunner:
 
 @pytest.fixture
 def mock_runner() -> FakeRunner:
-    """Observable FakeRunner implementing the Runner Protocol."""
     return FakeRunner()
 
 
-# ---------------------------------------------------------------------------
-# Test doubles for runner/agent_factory unit tests (still stubs)
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def mock_model_provider():
+    pytest.skip("Awaits implementation")
 
 
 @pytest.fixture
-def mock_model_provider():  # pragma: no cover - awaits Track G fixture lift
-    pytest.skip("Awaits implementation — Track G fixture lift")
-
-
-@pytest.fixture
-def mock_tools():  # pragma: no cover - awaits Track G fixture lift
-    pytest.skip("Awaits implementation — Track G fixture lift")
-
-
-# ---------------------------------------------------------------------------
-# Docker helpers (for e2e)
-# ---------------------------------------------------------------------------
+def mock_tools():
+    pytest.skip("Awaits implementation")
 
 
 def _docker_ps_for_session(session_id: str) -> list[str]:
-    """Return container IDs labelled with `kloc.session_id=<session_id>`."""
     try:
         out = subprocess.check_output(
             [
@@ -489,20 +295,12 @@ def docker_ps_for_session():
     return _docker_ps_for_session
 
 
-# ---------------------------------------------------------------------------
-# Pytest configuration
-# ---------------------------------------------------------------------------
-
-
 def pytest_configure(config: Any) -> None:
-    """Register custom markers in case pyproject.toml lookup is bypassed."""
     config.addinivalue_line("markers", "unit: pure Python, no IO, no network")
     config.addinivalue_line(
-        "markers",
-        "integration: real Postgres + backend HTTP; runner + LLM mocked",
+        "markers", "integration: real Postgres + backend HTTP"
     )
     config.addinivalue_line(
-        "markers",
-        "e2e: full compose + real Anthropic + real Docker runner",
+        "markers", "e2e: full compose + real Docker runner"
     )
-    config.addinivalue_line("markers", "slow: takes > 30s; usually e2e")
+    config.addinivalue_line("markers", "slow: takes > 30s")

@@ -1,7 +1,6 @@
 import { notFound } from "next/navigation";
 import { Shell } from "@/components/Shell";
 import { Sidebar } from "@/components/Sidebar";
-import { ConversationHeader } from "@/components/ConversationHeader";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { getSession, listMessages } from "@/lib/api";
 import { ApiError } from "@/lib/api";
@@ -46,12 +45,6 @@ export default async function SessionPage({
     <Shell>
       <Sidebar activeId={sessionId} />
       <main className="flex-1 min-w-0 flex flex-col bg-[var(--color-canvas)]">
-        <ConversationHeader
-          title={detail.title}
-          sessionId={detail.id}
-          messageCount={history.messages.length}
-          closed={detail.closed_at !== null}
-        />
         <ConversationClient initialDetail={detail} initialHistory={history} />
       </main>
     </Shell>

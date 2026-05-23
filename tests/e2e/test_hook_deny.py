@@ -322,8 +322,7 @@ async def test_webhook_deny_only_targets_listed_tool(
 @pytest.mark.asyncio
 async def test_scenario_06_hook_deny_path(
     llm_api_key,
-    kloc_intelligence_path,
-    sot_json_fixture,
+    mcp_reachable,
     compose_stack,
     async_http_client,
     sse_helpers,

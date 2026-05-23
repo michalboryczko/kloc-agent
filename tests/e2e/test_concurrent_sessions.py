@@ -61,8 +61,7 @@ async def _run_one_session(
 @pytest.mark.asyncio
 async def test_scenario_11_concurrent_sessions_no_cross_talk(
     llm_api_key,
-    kloc_intelligence_path,
-    sot_json_fixture,
+    mcp_reachable,
     compose_stack,
     async_http_client,
     sse_helpers,

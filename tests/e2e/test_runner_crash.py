@@ -63,8 +63,7 @@ def _kill_session_container(session_id: str) -> str | None:
 @pytest.mark.asyncio
 async def test_scenario_07_runner_crash_mid_tool_call(
     llm_api_key,
-    kloc_intelligence_path,
-    sot_json_fixture,
+    mcp_reachable,
     compose_stack,
     async_http_client,
     sse_helpers,
