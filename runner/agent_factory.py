@@ -109,8 +109,20 @@ def _observe_subagents_loaded_gauge(count: int) -> None:
 
 
 def _load_skills_prompt(skills_dir: Path) -> str:
+    """Inline every SKILL.md body into the system prompt (eager load).
+
+    The default progressive-disclosure flow from `agentskills` puts only
+    name+description into the system prompt and expects the LLM to
+    `file_read` the body on demand. For our skill set (≤ a dozen, total
+    body well under 50 KB) the extra round-trip costs more latency than
+    the tokens save, and we WANT the orchestrator to internalize the
+    skills before it issues its first MCP call. So we use the
+    `agentskills` discoverer (it validates YAML frontmatter and silently
+    drops broken files with a warning) but inline the full body
+    ourselves.
+    """
     try:
-        from agentskills import discover_skills, generate_skills_prompt  # type: ignore
+        from agentskills import discover_skills  # type: ignore
     except ImportError:
         log.warning(
             "skills.agentskills_not_installed; skipping skills prompt"
@@ -123,7 +135,39 @@ def _load_skills_prompt(skills_dir: Path) -> str:
         return ""
     if not skills:
         return ""
-    return generate_skills_prompt(skills)
+
+    blocks: list[str] = []
+    for skill in sorted(skills, key=lambda s: s.name):
+        try:
+            content = Path(skill.path).read_text(encoding="utf-8")
+        except OSError:
+            log.warning(
+                "skills.body_read_failed",
+                extra={"skill": skill.name, "path": skill.path},
+            )
+            content = ""
+        # Strip YAML frontmatter so name/description don't appear twice.
+        if content.startswith("---"):
+            end = content.find("\n---", 3)
+            if end != -1:
+                content = content[end + 4 :].lstrip("\n")
+        blocks.append(
+            "<skill>\n"
+            f"  <name>{skill.name}</name>\n"
+            f"  <description>{skill.description}</description>\n"
+            f"  <body>\n{content}\n  </body>\n"
+            "</skill>"
+        )
+
+    header = (
+        "<available_skills>\n"
+        "The following skills are inlined in full. Treat each one as if "
+        "you had already read it — do NOT issue a file_read just to load "
+        "a SKILL.md whose body is already shown below. Apply the skill "
+        "when its description matches the user's question.\n"
+    )
+    footer = "</available_skills>"
+    return header + "\n".join(blocks) + "\n" + footer
 
 
 def build_agent(
