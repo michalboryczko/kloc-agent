@@ -89,7 +89,7 @@
     <operation id="ifc.list-messages"
                contract="ifc.public-rest"
                name="GET /v1/sessions/{session_id}/messages"
-               intent="Return a page of the Session's prior Messages in seq order with a cursor for older pages."
+               intent="Return a page of the Session's prior Messages in seq order with a cursor for older pages. Each Message carries a `tool_calls: ToolCallRecord[]` array (see `ifc.tool-call-record`) so the conversation surface can restore tool cards on reload."
                mode="sync-request-response"
                consistency="read-your-writes"
                delivery="at-most-once"
@@ -475,6 +475,43 @@
                     provider-promise="no-side-effect-on-failure"/>
     </operation>
   </contract>
+
+  <!-- ============================================================
+       Element: tool-call record. The JSON shape `MessageOut.tool_calls[]`
+       carries on the response of `ifc.list-messages` so the FE can
+       restore tool cards after a refresh. Not a wire protocol of its
+       own — a per-Message attachment — hence an `<element>`.
+       =========================== -->
+
+  <element id="ifc.tool-call-record">
+    <intent>One persisted Tool Call belonging to a Message. Surfaced
+    on `ifc.list-messages` so a session reload reconstructs the exact
+    set of Tool Calls (their state, args, result, and any denial
+    reason / hint) that the Analyst originally observed live.</intent>
+    <structure>
+      Fields:
+        - `tool_call_id: str` — the AG-UI / Strands tool-call id, used
+          by the FE reducer as the stable `ToolCallView.id`.
+        - `tool_name: str` — the tool the Assistant invoked
+          (e.g. `kloc_search_code`).
+        - `args: str` — the accumulated `TOOL_CALL_ARGS` deltas, as
+          received from the runner.
+        - `result: str | null` — the `TOOL_CALL_RESULT.content` body,
+          truncated at persistence time to
+          `KLOC_TOOL_LIMITS.result_max_bytes` with a `…[truncated]`
+          marker; null while running or denied.
+        - `state: "running" | "done" | "denied"` — the terminal state.
+        - `denied_reason: str | null` — populated when `state == "denied"`.
+        - `denied_hint: str | null` — populated when `state == "denied"`
+          and the policy evaluator returned an actionable hint.
+        - `seq: int` — per-`parent_message_id` order in which the tool
+          call fired; the FE renders tool cards in this order.
+        - `created_at: datetime` — when `TOOL_CALL_START` landed.
+        - `finalized_at: datetime | null` — when `TOOL_CALL_END` or
+          `ToolCallDenied` landed.
+    </structure>
+    <consumed-by>cmp.frontend.api-client</consumed-by>
+  </element>
 
   <!-- ============================================================
        Element: agents mount surface. Read-only named-volume contract

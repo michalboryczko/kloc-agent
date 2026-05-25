@@ -1,6 +1,7 @@
 import type { MessageView } from "@/lib/types";
 import { ArtifactChip } from "./ArtifactChip";
 import { BlinkingCaret } from "./BlinkingCaret";
+import { MarkdownContent } from "./MarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
 
 export function AssistantBubble({
@@ -50,10 +51,14 @@ export function AssistantBubble({
           </div>
         ) : null}
         {message.content || showCaret ? (
-          <p className="text-[14px] leading-[1.65] mt-3 mb-4 whitespace-pre-wrap break-words">
-            {message.content}
-            {showCaret ? <BlinkingCaret /> : null}
-          </p>
+          <div className="mt-3 mb-4">
+            {message.content ? <MarkdownContent content={message.content} /> : null}
+            {showCaret ? (
+              <span className="inline-flex align-baseline">
+                <BlinkingCaret />
+              </span>
+            ) : null}
+          </div>
         ) : null}
         {message.artifacts.length > 0 ? (
           <div className="flex flex-wrap gap-2 mt-2">

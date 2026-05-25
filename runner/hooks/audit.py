@@ -63,6 +63,18 @@ class AuditHookSender:
         self._dropped_once = False
         self._denied_emitted: set[str] = set()
         self._artifact_emitted: set[str] = set()
+        # Threaded through to BeforeToolCall webhook payloads + ToolCallDenied
+        # custom events so the persister and the FE reducer can group tool
+        # calls under the assistant Message currently being streamed. Lifecycle
+        # is owned by the AG-UI emitter wrapper: set on TEXT_MESSAGE_START,
+        # cleared on TEXT_MESSAGE_END. MUST NOT outlive a run.
+        self._active_message_id: str | None = None
+
+    def set_active_message_id(self, message_id: str | None) -> None:
+        """Update the assistant message id used to stamp parent linkage on
+        subsequent tool-call emissions. Called by the AG-UI emitter wrapper
+        when it sees TEXT_MESSAGE_START / TEXT_MESSAGE_END frames."""
+        self._active_message_id = message_id
 
     async def start(self) -> None:
         if self._http is None:
@@ -117,13 +129,16 @@ class AuditHookSender:
             self._session_id,
             self._run_id_provider(),
         )
+        before_payload: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "args": tool_input,
+        }
+        if self._active_message_id:
+            before_payload["parent_message_id"] = self._active_message_id
         payload = self._build_payload(
             event_name="BeforeToolCall",
-            payload={
-                "tool_call_id": tool_call_id,
-                "tool_name": tool_name,
-                "args": tool_input,
-            },
+            payload=before_payload,
         )
         try:
             response = await self._post(payload, "BeforeToolCall")
@@ -180,6 +195,8 @@ class AuditHookSender:
         }
         if hint:
             value["hint"] = hint
+        if self._active_message_id:
+            value["parentMessageId"] = self._active_message_id
         await self._emit_custom_event(
             {
                 "type": "CUSTOM",

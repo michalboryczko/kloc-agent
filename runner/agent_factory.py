@@ -212,7 +212,214 @@ def build_agent(
     return agent, _AuditHookProvider(audit_sender)
 
 
-def wrap_for_agui(agent: Any, audit_provider: _AuditHookProvider | None = None) -> Any:
+class _ParentLinkingAGUIAgent:
+    """Wraps an `ag_ui_strands.StrandsAgent` so every emitted AG-UI event
+    flows through one place where we can enforce a turn-stable assistant
+    message id.
+
+    Strands' AG-UI adapter does NOT emit `TEXT_MESSAGE_START` before
+    `TOOL_CALL_START` in the common case (observed empirically: a turn
+    with N tool calls produces N `TOOL_CALL_START` events each with a
+    distinct, Strands-internal `parent_message_id` and zero
+    `TEXT_MESSAGE_START`s on the wire). Watching for
+    `TEXT_MESSAGE_START` to derive the active assistant id therefore
+    never fires, and every tool call lands in its own FE bubble.
+
+    The fix: bind the active id to the `runId` itself. On `RUN_STARTED`
+    we mint `assistant:run:<runId>` and:
+
+      * set it on `AuditHookSender._active_message_id` so the webhook /
+        `ToolCallDenied` paths stamp it on persistence side;
+      * synthesise a single `TEXT_MESSAGE_START(messageId=<id>,
+        role=assistant)` BEFORE any downstream Strands event, so the FE
+        reducer's `ensureAssistantMessage` creates exactly one assistant
+        bubble for the whole turn;
+      * rewrite the `messageId` on any subsequent Strands-emitted
+        `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END` to that same id so
+        the assistant's prose (when the model finally speaks) attaches
+        to the same bubble — otherwise the tool cards group in bubble A
+        and the prose lands in bubble B;
+      * suppress secondary `TEXT_MESSAGE_START`s Strands may emit
+        mid-turn (they carry a different id and would split the
+        bubble);
+      * stamp `parentMessageId = <id>` onto every `TOOL_CALL_START`,
+        overriding whatever Strands put there.
+
+    On `RUN_FINISHED` / `RUN_ERROR` we emit a closing
+    `TEXT_MESSAGE_END(messageId=<id>)` (if we opened one), then clear
+    `_active_message_id`. The wrapper IS the only place AG-UI events
+    leave the runner, so the read/write of `_active_message_id` is
+    serialised against tool-call emissions naturally.
+    """
+
+    def __init__(self, inner: Any, audit_sender: AuditHookSender) -> None:
+        self._inner = inner
+        self._audit_sender = audit_sender
+
+    def __getattr__(self, name: str) -> Any:
+        # Pass-through for any StrandsAgent surface we don't need to
+        # intercept (e.g. config, instrumentation hooks). `run` is the
+        # only method we override below.
+        return getattr(self._inner, name)
+
+    async def run(self, run_input: Any):
+        active_id: str | None = None
+        opened_text_message = False
+
+        async for event in self._inner.run(run_input):
+            event_type = _event_field(event, "type")
+
+            if event_type == "RUN_STARTED":
+                run_id = (
+                    _event_field(event, "runId")
+                    or _event_field(event, "run_id")
+                    or getattr(run_input, "run_id", None)
+                    or ""
+                )
+                active_id = f"assistant:run:{run_id}" if run_id else None
+                if active_id:
+                    self._audit_sender.set_active_message_id(active_id)
+                yield event
+                if active_id:
+                    # Synthetic open of the assistant bubble for this turn.
+                    # The FE reducer routes subsequent TOOL_CALL_START and
+                    # TEXT_MESSAGE_CONTENT into the same MessageView via
+                    # this id.
+                    yield {
+                        "type": "TEXT_MESSAGE_START",
+                        "messageId": active_id,
+                        "role": "assistant",
+                    }
+                    opened_text_message = True
+                continue
+
+            if event_type in ("RUN_FINISHED", "RUN_ERROR"):
+                if opened_text_message and active_id:
+                    yield {
+                        "type": "TEXT_MESSAGE_END",
+                        "messageId": active_id,
+                    }
+                    opened_text_message = False
+                yield event
+                self._audit_sender.set_active_message_id(None)
+                active_id = None
+                continue
+
+            if event_type == "TEXT_MESSAGE_START":
+                # We already opened the assistant bubble at RUN_STARTED;
+                # additional starts from Strands would split the bubble.
+                # Skip emit but keep the id contract.
+                if active_id and not opened_text_message:
+                    yield {
+                        "type": "TEXT_MESSAGE_START",
+                        "messageId": active_id,
+                        "role": "assistant",
+                    }
+                    opened_text_message = True
+                continue
+
+            if event_type == "TEXT_MESSAGE_CONTENT":
+                # Force every prose delta into the turn-stable bubble.
+                if active_id:
+                    event = _rewrite_message_id(event, active_id)
+                yield event
+                continue
+
+            if event_type == "TEXT_MESSAGE_END":
+                # Swallow Strands' END; we close the synthetic bubble at
+                # RUN_FINISHED so re-opens within one turn don't finalize
+                # the bubble prematurely (the FE reducer's TEXT_MESSAGE_END
+                # handler flips finalized=true, which the bubble UI styles
+                # differently).
+                continue
+
+            if event_type == "TOOL_CALL_START":
+                if active_id:
+                    event = _stamp_parent_message_id(event, active_id)
+                yield event
+                continue
+
+            yield event
+
+
+def _event_field(event: Any, name: str) -> Any:
+    """Read a field off an AG-UI event whether it is a Pydantic model
+    (camelCase attribute via alias-generator) or a plain dict."""
+    if isinstance(event, dict):
+        return event.get(name)
+    return getattr(event, name, None)
+
+
+def _stamp_parent_message_id(event: Any, message_id: str) -> Any:
+    """Return a copy of `event` with `parentMessageId` set. Handles both
+    the Pydantic model path (model_copy when available) and the raw-dict
+    path (the runner's emit loop in `runner/__main__.py` may emit either,
+    depending on whether the upstream adapter yielded a typed event).
+    Overwrites any pre-existing value — Strands stamps its own
+    per-tool-call parent id which we must replace with the turn-stable
+    id.
+    """
+    if isinstance(event, dict):
+        out = dict(event)
+        out["parentMessageId"] = message_id
+        out.pop("parent_message_id", None)
+        return out
+    model_copy = getattr(event, "model_copy", None)
+    if callable(model_copy):
+        try:
+            return model_copy(update={"parent_message_id": message_id})
+        except Exception:
+            # ag-ui Pydantic models use to_camel alias generator; the
+            # python attribute is snake_case. Fall through to setattr
+            # if model_copy refuses an unknown field for some reason.
+            pass
+    try:
+        setattr(event, "parent_message_id", message_id)
+    except Exception:
+        try:
+            setattr(event, "parentMessageId", message_id)
+        except Exception:
+            log.warning(
+                "agent_factory.parent_id_stamp_failed type=%r",
+                type(event).__name__,
+            )
+    return event
+
+
+def _rewrite_message_id(event: Any, message_id: str) -> Any:
+    """Return a copy of `event` with `messageId` set to the supplied id.
+    Used for TEXT_MESSAGE_CONTENT so Strands' per-internal-message id is
+    coerced into the turn-stable id allocated at RUN_STARTED.
+    """
+    if isinstance(event, dict):
+        out = dict(event)
+        out["messageId"] = message_id
+        out.pop("message_id", None)
+        return out
+    model_copy = getattr(event, "model_copy", None)
+    if callable(model_copy):
+        try:
+            return model_copy(update={"message_id": message_id})
+        except Exception:
+            pass
+    try:
+        setattr(event, "message_id", message_id)
+    except Exception:
+        try:
+            setattr(event, "messageId", message_id)
+        except Exception:
+            log.warning(
+                "agent_factory.message_id_rewrite_failed type=%r",
+                type(event).__name__,
+            )
+    return event
+
+
+def wrap_for_agui(
+    agent: Any,
+    audit_provider: _AuditHookProvider | None = None,
+    audit_sender: AuditHookSender | None = None,
+) -> Any:
     """Return the AG-UI-emitting adapter.
 
     `ag_ui_strands.StrandsAgent(agent, StrandsAgentConfig(...),
@@ -222,8 +429,17 @@ def wrap_for_agui(agent: Any, audit_provider: _AuditHookProvider | None = None) 
     Passing `audit_provider` is required: the per-thread inner agent
     the wrapper constructs only picks up hooks supplied via the
     `hooks=` kwarg; the seed Agent's hook registry is discarded.
+
+    Passing `audit_sender` enables the parent-linking wrapper that
+    threads `parentMessageId` from the active assistant message onto
+    every `TOOL_CALL_START` / `ToolCallDenied` emission of that run.
     """
     from ag_ui_strands import StrandsAgent, StrandsAgentConfig  # type: ignore
 
     hooks_arg = [audit_provider] if audit_provider is not None else None
-    return StrandsAgent(agent, StrandsAgentConfig(), hooks=hooks_arg)
+    inner = StrandsAgent(agent, StrandsAgentConfig(), hooks=hooks_arg)
+    if audit_sender is None and audit_provider is not None:
+        audit_sender = audit_provider._audit_sender
+    if audit_sender is None:
+        return inner
+    return _ParentLinkingAGUIAgent(inner, audit_sender)

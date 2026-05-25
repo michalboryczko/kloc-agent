@@ -260,6 +260,7 @@
       <rule ref="beh.rule.closed-session-immutable"/>
       <rule ref="beh.rule.artifact-surfaced"/>
       <rule ref="beh.rule.single-analyst-ownership"/>
+      <rule ref="rul.tool-call-parent-id"/>
     </rules>
     <invariants>
       <invariant ref="inv.message-sequence-monotonic"/>
@@ -361,6 +362,10 @@
 
   <rule id="beh.rule.artifact-surfaced" pattern="event-driven">
     When the Assistant attaches an Artifact to a Session, the system shall surface the Artifact's name to the Analyst alongside the conversation.
+  </rule>
+
+  <rule id="rul.tool-call-parent-id" pattern="event-driven">
+    Every TOOL_CALL_START AG-UI event (and every CUSTOM { name: ToolCallDenied } event) emitted during an Assistant turn shall carry a parentMessageId equal to the messageId of the most-recent TEXT_MESSAGE_START within that run. Tool calls that arrive without parentMessageId shall be dropped by the frontend reducer with a console warning; the runner is the source of truth.
   </rule>
 
   <rule id="beh.rule.single-analyst-ownership" pattern="ubiquitous">

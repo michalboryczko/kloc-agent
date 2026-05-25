@@ -59,11 +59,13 @@
       <rule>For `POST /v1/sessions/{id}/stream` the user-message enqueue is delegated to `cmp.backend.messaging`; the API module never calls `pgmq.*` or `NOTIFY` directly, never holds an `asyncio.Queue` of pending user messages, and never references `RegistryEntry.inbox` (which no longer exists).</rule>
       <rule>For `POST /v1/webhooks/...` resolve the per-runner HMAC secret BEFORE running HMAC verification; reject with 401 if the registry has no entry and fallback is not allowed, never test the bootstrap secret against an unknown `runner_id`.</rule>
       <rule>For artifact registration, audit row + ON CONFLICT INSERT + policy decision commit in the same transaction.</rule>
+      <rule>The persister coroutine `stream._persist_events` writes text deltas to `messages.content` AND tool-call lifecycle events (`TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END` / `TOOL_CALL_RESULT` / `CUSTOM ToolCallDenied`) to the `tool_calls` table, keyed by the AG-UI `parentMessageId` resolved through the lazy `_ensure_assistant_row` helper. Tool-call events without a resolvable parent are dropped with a logged warning.</rule>
     </logic>
     <requires ref="cmp.backend.streaming"/>
     <requires ref="cmp.backend.runner-mgmt"/>
     <requires ref="cmp.backend.messaging"/>
     <requires ref="cmp.backend.repos"/>
+    <requires ref="cmp.backend.tool-call-repo"/>
     <requires ref="cmp.backend.hooks-audit"/>
     <requires ref="cmp.backend.storage"/>
     <requires ref="cmp.backend.db"/>
@@ -73,6 +75,43 @@
       <constraint ref="con.api-no-business-rules"/>
       <constraint ref="con.commit-before-return"/>
       <constraint ref="con.api-no-direct-pgmq"/>
+      <constraint ref="con.tool-call-parent-fk-required"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.backend.tool-call-repo"
+             zone="src/repos/tool_calls.py"
+             in-unit="top.backend">
+    <intent>`ToolCallRepo` — the durable sink for AG-UI tool-call
+    lifecycle events. One row per `(session_id, tool_call_id)`, linked
+    by `parent_message_id` FK to the assistant Message the tool call
+    belongs to. Re-emission across SSE drops is absorbed by
+    `INSERT ... ON CONFLICT (session_id, tool_call_id) DO UPDATE`.
+    Re-emission of args concatenates server-side via `args = args || $delta`.
+    State transitions are state-aware: a late `TOOL_CALL_END` does not
+    overwrite a row already in `denied`. Result bodies are truncated at
+    persistence time to `KLOC_TOOL_LIMITS.result_max_bytes` with a
+    `…[truncated]` marker mirroring `runner/offload.py`.</intent>
+    <structure>
+      - `upsert_started(session_id, parent_message_id, tool_call_id, tool_name)`
+        returns the row id; allocates `seq` via
+        `(SELECT COALESCE(MAX(seq), 0) + 1 FROM tool_calls WHERE parent_message_id = ?)`.
+      - `append_args_delta(session_id, tool_call_id, delta)` server-side
+        concat; logs a warning and no-ops if the row is missing.
+      - `mark_done(session_id, tool_call_id)` flips `state = 'done'`
+        only when the prior `state = 'running'`.
+      - `set_result(session_id, tool_call_id, result)` truncates and
+        UPDATEs.
+      - `mark_denied(session_id, tool_call_id, reason, hint)` flips
+        `state = 'denied'`, sets reason / hint / `finalized_at`.
+      - `list_for_messages(session_id, message_ids)` one-shot SELECT
+        keyed by `parent_message_id IN (...)`, ordered by parent + seq.
+    </structure>
+    <requires ref="cmp.backend.db"/>
+    <constraints>
+      <constraint ref="con.repo-async-session-injected"/>
+      <constraint ref="con.repo-no-http"/>
+      <constraint ref="con.tool-call-parent-fk-required"/>
     </constraints>
   </component>
 
@@ -203,6 +242,13 @@
       - messages.py — `MessageRepo` (`_next_seq` + `append` with
         savepoint+UNIQUE retry, `append_delta` server-side concat,
         `finalize`, `get`, `list_for_session`).
+      - tool_calls.py — `ToolCallRepo` (`upsert_started` with
+        `ON CONFLICT (session_id, tool_call_id) DO UPDATE`,
+        `append_args_delta` server-side concat, `mark_done` /
+        `mark_denied` state transitions, `set_result` with
+        size-cap truncation via `KLOC_TOOL_LIMITS.result_max_bytes`,
+        `list_for_messages` batched lookup keyed by
+        `parent_message_id IN (...)`).
       - audit.py — `AuditRepo` (`append` validating against the
         locked 12-name vocabulary, `last_state_snapshot` via JSONB
         `@>` predicate, `list_for_session`).
@@ -468,11 +514,51 @@
     <logic>
       <rule>The pending Assistant indicator is shown inside the conversation thread (carrying the Assistant's identity), not as a separate connection-status banner.</rule>
       <rule>The Tool Denial style is visually distinct from a completed Tool Call in both colour AND label.</rule>
+      <rule>`AssistantBubble` renders `message.content` through `cmp.frontend.markdown-content` (a styled `react-markdown` tree), never as a raw text node inside a `&lt;p&gt;`. The user-side `AnalystBubble` stays plain text.</rule>
     </logic>
     <requires ref="cmp.frontend.api-client"/>
+    <requires ref="cmp.frontend.markdown-content"/>
     <constraints>
       <constraint ref="con.component-no-direct-fetch"/>
       <constraint ref="con.tool-denial-visually-distinct"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.frontend.markdown-content"
+             zone="frontend/src/components/MarkdownContent.tsx"
+             in-unit="top.frontend">
+    <intent>Styled markdown renderer for assistant prose. Wraps
+    `react-markdown` v9 + `remark-gfm`, supplies per-element
+    component overrides themed with the existing Tailwind tokens
+    (chip background for inline code and code blocks, accent colour
+    for links), and constrains URLs through a whitelist
+    `urlTransform` / `imageTransform`. Raw HTML in markdown source is
+    NOT rendered — `rehype-raw` is deliberately not enabled, so
+    `&lt;script&gt;` / `&lt;iframe&gt;` / other raw tags surface as escaped text.
+    Used by `AssistantBubble`; not used by `AnalystBubble` (user
+    messages are intentionally plain text).</intent>
+    <structure>
+      One `MarkdownContent({ content })` named export rendering
+      `&lt;ReactMarkdown remarkPlugins={[remarkGfm]}
+      urlTransform={urlTransform} components={...}&gt;` inside a wrapper
+      `&lt;div data-test="assistant-markdown"&gt;`. Component overrides
+      cover `a`, `code`, `pre`, `p`, `ul`, `ol`, `h1`/`h2`/`h3`,
+      `blockquote`, `table`/`th`/`td`, `hr`, `img`. Link `href` runs
+      through `urlTransform`; image `src` runs through
+      `imageTransform`. Inline-vs-block code is detected by the
+      presence of a `language-*` className on the `code` element,
+      because react-markdown v9 removed the `inline` prop.
+    </structure>
+    <logic>
+      <rule>`urlTransform` whitelists `http(s):`, `mailto:`, `tel:`, fragment (`#…`), root-relative (`/…`), and dot-relative (`./…`, `../…`) URLs; anything else (including `javascript:` and bare `data:`) collapses to `#`.</rule>
+      <rule>`imageTransform` whitelists `http(s):` and `data:image/`; anything else collapses to an empty string.</rule>
+      <rule>Every rendered link carries `target="_blank"` and `rel="noopener noreferrer nofollow"`.</rule>
+      <rule>No `rehype-raw` plugin and no `dangerouslySetInnerHTML` anywhere — raw HTML in `content` is rendered as escaped text.</rule>
+      <rule>The blinking caret is rendered by `AssistantBubble` as a sibling element OUTSIDE the markdown tree, so half-typed tokens during streaming do not interact with the markdown parser at the DOM boundary.</rule>
+    </logic>
+    <constraints>
+      <constraint ref="con.markdown-no-raw-html"/>
+      <constraint ref="con.markdown-link-target-rel"/>
     </constraints>
   </component>
 
@@ -611,16 +697,22 @@
     <intent>Strands hook callbacks that POST audit webhooks to the
     backend and translate backend responses into Strands cancellation
     semantics. Owns the HMAC signing, the 2 s BeforeToolCall
-    deadline, the fire-and-forget AfterToolCall queue, and the
+    deadline, the fire-and-forget AfterToolCall queue, the
     `ArtifactRegistered` path that also emits the AG-UI
-    `ArtifactAttached` Custom event.</intent>
+    `ArtifactAttached` Custom event, and the per-run
+    `_active_message_id` that links tool-call emissions to the
+    assistant Message currently being streamed.</intent>
     <structure>
       - audit.py — `AuditHookSender.before_tool_call` (blocks ≤ 2 s,
         translates timeout/error/deny into `cancel_tool` plus a
-        `CUSTOM ToolCallDenied` event); `after_tool_call`
+        `CUSTOM ToolCallDenied` event, stamps `parent_message_id` on
+        the webhook payload from `_active_message_id`); `after_tool_call`
         (fire-and-forget through a 256-slot queue, emits a
         `HookBackpressure` once on QueueFull); `register_artifact`
-        (POSTs `ArtifactRegistered` then emits `ArtifactAttached`).
+        (POSTs `ArtifactRegistered` then emits `ArtifactAttached`);
+        `set_active_message_id(message_id)` setter driven by the
+        AG-UI emitter wrapper in `cmp.runner.entrypoint` at
+        TEXT_MESSAGE_START / TEXT_MESSAGE_END boundaries.
       - utils.py — `resolve_tool_call` unwraps the
         `skill_executor` wrapper so audit names surface the real
         underlying tool.
@@ -630,11 +722,13 @@
       <rule>AfterToolCall is fire-and-forget through a bounded queue; on overflow emit `HookBackpressure` once but never drop BeforeToolCall.</rule>
       <rule>`ArtifactRegistered` is HMAC-POSTed BEFORE the AG-UI `ArtifactAttached` custom event so the FE never renders a chip whose artifact_id has not yet reached the DB.</rule>
       <rule>Stop drains the AfterToolCall queue under exclusive ownership AFTER cancelling the worker, so each in-flight POST is bounded by the per-request httpx timeout.</rule>
+      <rule>`_active_message_id` is updated only by the AG-UI emitter wrapper around `wrap_for_agui` and never read by callers other than the BeforeToolCall payload builder and the ToolCallDenied custom-event builder.</rule>
     </logic>
     <requires ref="cmp.runner.channel"/>
     <constraints>
       <constraint ref="con.hook-deadline-bounded"/>
       <constraint ref="con.hook-after-fire-and-forget"/>
+      <constraint ref="con.audit-active-message-id-lifecycle"/>
     </constraints>
   </component>
 
@@ -728,6 +822,16 @@
     <intent>`AuditRepo.append` validates the supplied `event_type`
     against `AUDIT_EVENT_TYPES` and raises on miss.</intent>
     <require>`event_type` is checked against `AUDIT_EVENT_TYPES` at the entry of `append`.</require>
+  </constraint>
+
+  <constraint id="con.tool-call-parent-fk-required" type="rule">
+    <intent>`tool_calls.parent_message_id` is `NOT NULL` and references
+    `messages.id`. Persistence of a tool-call event without a
+    resolvable parent message id is a no-op with a logged warning;
+    the persister never invents a parent row from event-stream context.</intent>
+    <require>The schema column `tool_calls.parent_message_id` is `NOT NULL` with a foreign key to `messages.id ON DELETE CASCADE`.</require>
+    <require>The persister branch for `TOOL_CALL_START` logs `persister.tool_call_start.no_parent` and skips persistence when `parentMessageId` is missing on the wire event.</require>
+    <forbid construct="tool-call-parent-id-synthesised-from-event-stream"/>
   </constraint>
 
   <!-- db -->
@@ -855,6 +959,25 @@
     <forbid construct="denial-state-colour-only"/>
   </constraint>
 
+  <constraint id="con.markdown-no-raw-html" type="rule">
+    <intent>`MarkdownContent` MUST NOT enable `rehype-raw` or any
+    plugin that allows raw HTML in markdown source. Raw HTML in
+    `message.content` is rendered as escaped text.</intent>
+    <forbid construct="markdown-rehype-raw-plugin"/>
+    <forbid construct="markdown-dangerously-set-inner-html"/>
+  </constraint>
+
+  <constraint id="con.markdown-link-target-rel" type="rule">
+    <intent>Links rendered by `MarkdownContent` open in a new tab
+    (`target="_blank"`) with `rel="noopener noreferrer nofollow"`.
+    The `href` is run through `urlTransform` which permits only
+    `http(s):`, `mailto:`, `tel:`, fragment, root-relative, and
+    dot-relative URLs.</intent>
+    <require>The `a` component override sets `target="_blank"` and `rel="noopener noreferrer nofollow"` on every rendered anchor.</require>
+    <require>`urlTransform` is passed to `&lt;ReactMarkdown&gt;` and rewrites any non-whitelisted scheme to `#`.</require>
+    <forbid construct="markdown-link-without-noopener"/>
+  </constraint>
+
   <!-- Runner -->
 
   <constraint id="con.runner-mcp-scope-wraps-loop" type="pattern">
@@ -951,6 +1074,19 @@
     loop.</intent>
     <require>The After queue uses `put_nowait` and catches `asyncio.QueueFull`.</require>
     <forbid construct="after-hook-blocking-put"/>
+  </constraint>
+
+  <constraint id="con.audit-active-message-id-lifecycle" type="rule">
+    <intent>`AuditHookSender._active_message_id` is set on
+    MessageStartEvent (AG-UI TEXT_MESSAGE_START) and cleared on
+    MessageStopEvent (AG-UI TEXT_MESSAGE_END). It MUST NOT outlive a
+    run: any tool-call audit emission produced when no assistant
+    message is open carries no `parent_message_id`, and the FE
+    reducer drops such an event with a console warning rather than
+    synthesising a parent.</intent>
+    <require>`set_active_message_id(message_id)` is called by the AG-UI emitter wrapper on TEXT_MESSAGE_START.</require>
+    <require>`set_active_message_id(None)` is called by the AG-UI emitter wrapper on TEXT_MESSAGE_END.</require>
+    <forbid construct="active-message-id-set-outside-emitter-wrapper"/>
   </constraint>
 
 

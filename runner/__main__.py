@@ -122,7 +122,9 @@ async def _run() -> None:
             strands_agent, audit_provider = build_agent(
                 hydration, mcp_tools, audit_sender
             )
-            agui_agent = wrap_for_agui(strands_agent, audit_provider)
+            agui_agent = wrap_for_agui(
+                strands_agent, audit_provider, audit_sender=audit_sender
+            )
 
             await channel.emit(
                 {

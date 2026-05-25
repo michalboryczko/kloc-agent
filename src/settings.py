@@ -36,6 +36,10 @@ class ToolLimitsConfig(BaseModel):
 
     file_read: FileReadLimits | None = None
     kloc_flows: KlocFlowsLimits | None = None
+    # Stored-data cap for the `tool_calls.result` column. Live SSE
+    # delivery is untouched — this only governs persistence, mirroring
+    # the runner-side oversize-offload marker semantics.
+    result_max_bytes: int = 64_000
 
 
 class Settings(BaseSettings):

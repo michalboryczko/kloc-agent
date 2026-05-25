@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     Enum as SAEnum,
     ForeignKey,
@@ -194,6 +195,59 @@ class Message(Base):
             "session_id",
             postgresql_where=text("finalized_at IS NULL"),
         ),
+    )
+
+
+ToolCallState = Literal["running", "done", "denied"]
+
+
+class ToolCall(Base):
+    __tablename__ = "tool_calls"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    tool_call_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    parent_message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    args: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("''")
+    )
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[ToolCallState] = mapped_column(Text, nullable=False)
+    denied_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    denied_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('running', 'done', 'denied')",
+            name="ck_tool_calls_state",
+        ),
+        UniqueConstraint(
+            "session_id",
+            "tool_call_id",
+            name="uq_tool_calls_session_tool_id",
+        ),
+        Index("ix_tool_calls_parent_message", "parent_message_id"),
+        Index("ix_tool_calls_session_seq", "session_id", "seq"),
     )
 
 

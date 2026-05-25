@@ -9,8 +9,9 @@ POST /v1/sessions/{id}/close    -> 204
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -22,6 +23,7 @@ from src.db.models import Message, Session as SessionModel
 from src.repos.audit import AuditRepo
 from src.repos.messages import MessageRepo
 from src.repos.sessions import SessionRepo
+from src.repos.tool_calls import ToolCallRepo
 
 
 router = APIRouter(tags=["sessions"])
@@ -52,6 +54,19 @@ class SessionDetail(BaseModel):
     metadata: dict[str, Any]
 
 
+class ToolCallOut(BaseModel):
+    tool_call_id: str
+    tool_name: str
+    args: str
+    result: str | None
+    state: Literal["running", "done", "denied"]
+    denied_reason: str | None
+    denied_hint: str | None
+    seq: int
+    created_at: datetime
+    finalized_at: datetime | None
+
+
 class MessageOut(BaseModel):
     id: uuid.UUID
     session_id: uuid.UUID
@@ -62,6 +77,7 @@ class MessageOut(BaseModel):
     seq: int
     created_at: datetime
     finalized_at: datetime | None
+    tool_calls: list[ToolCallOut] = Field(default_factory=list)
 
 
 class MessagesPage(BaseModel):
@@ -207,6 +223,29 @@ async def list_messages(
     has_more = len(rows) > limit
     rows = rows[:limit]
     next_cursor = rows[-1].seq if (has_more and rows) else None
+
+    # One batched SELECT — `list_for_messages` returns flat, grouped here.
+    tool_repo = ToolCallRepo(db)
+    tool_rows = await tool_repo.list_for_messages(
+        session_id=session_id, message_ids=[r.id for r in rows]
+    )
+    grouped: dict[uuid.UUID, list[ToolCallOut]] = defaultdict(list)
+    for t in tool_rows:
+        grouped[t.parent_message_id].append(
+            ToolCallOut(
+                tool_call_id=t.tool_call_id,
+                tool_name=t.tool_name,
+                args=t.args,
+                result=t.result,
+                state=t.state,
+                denied_reason=t.denied_reason,
+                denied_hint=t.denied_hint,
+                seq=t.seq,
+                created_at=t.created_at,
+                finalized_at=t.finalized_at,
+            )
+        )
+
     return MessagesPage(
         messages=[
             MessageOut(
@@ -219,6 +258,7 @@ async def list_messages(
                 seq=m.seq,
                 created_at=m.created_at,
                 finalized_at=m.finalized_at,
+                tool_calls=grouped.get(m.id, []),
             )
             for m in rows
         ],

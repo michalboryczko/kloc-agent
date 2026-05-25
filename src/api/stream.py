@@ -26,6 +26,7 @@ from src.messaging.pgmq import (
 )
 from src.repos.audit import AuditRepo
 from src.repos.messages import MessageRepo
+from src.repos.tool_calls import ToolCallRepo
 from src.settings import get_settings
 from src.streaming.agui_event_formatter import (
     is_run_lifecycle_terminal,
@@ -243,6 +244,7 @@ async def _persist_events(
 
     async with sessionmaker() as session:
         repo = MessageRepo(session)
+        tool_repo = ToolCallRepo(session)
 
         async def _ensure_assistant_row(agui_msg_id: str) -> uuid.UUID:
             if agui_msg_id in message_uuid:
@@ -317,6 +319,62 @@ async def _persist_events(
                     )
                 elif kind == "TEXT_MESSAGE_END":
                     await debouncer.on_end(wire["messageId"])
+                elif kind == "TOOL_CALL_START":
+                    parent_agui_msg_id = wire.get("parentMessageId")
+                    if not parent_agui_msg_id:
+                        # Defensive: T05 guarantees parentMessageId on
+                        # every TOOL_CALL_START. A missing field here is
+                        # a regression in the runner emit path.
+                        log.warning(
+                            "persister.tool_call_start.no_parent "
+                            "session=%s tool_call_id=%s",
+                            session_id,
+                            wire.get("toolCallId"),
+                        )
+                    else:
+                        parent_row_id = await _ensure_assistant_row(
+                            parent_agui_msg_id
+                        )
+                        await tool_repo.upsert_started(
+                            session_id=session_uuid,
+                            parent_message_id=parent_row_id,
+                            tool_call_id=wire["toolCallId"],
+                            tool_name=wire["toolCallName"],
+                        )
+                        await session.commit()
+                elif kind == "TOOL_CALL_ARGS":
+                    await tool_repo.append_args_delta(
+                        session_id=session_uuid,
+                        tool_call_id=wire["toolCallId"],
+                        delta=wire["delta"],
+                    )
+                    await session.commit()
+                elif kind == "TOOL_CALL_END":
+                    await tool_repo.mark_done(
+                        session_id=session_uuid,
+                        tool_call_id=wire["toolCallId"],
+                    )
+                    await session.commit()
+                elif kind == "TOOL_CALL_RESULT":
+                    content = wire.get("content")
+                    if isinstance(content, str):
+                        await tool_repo.set_result(
+                            session_id=session_uuid,
+                            tool_call_id=wire["toolCallId"],
+                            result=content,
+                        )
+                        await session.commit()
+                elif kind == "CUSTOM" and wire.get("name") == "ToolCallDenied":
+                    value = wire.get("value", {}) or {}
+                    tcid = value.get("toolCallId")
+                    if tcid:
+                        await tool_repo.mark_denied(
+                            session_id=session_uuid,
+                            tool_call_id=tcid,
+                            reason=value.get("reason"),
+                            hint=value.get("hint"),
+                        )
+                        await session.commit()
                 if is_run_lifecycle_terminal(wire):
                     return
         finally:

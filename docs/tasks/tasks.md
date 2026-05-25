@@ -38,6 +38,9 @@ in the USDL plugin.
 | T02 | tool-result-size-limits: argument-aware tool policy + actionable hints               | passed-infra-skipped | —           |
 | T03 | fix-runner-startup-heartbeat-race: first-heartbeat budget too tight for cold-start MCP init | passed-infra-skipped | —           |
 | T04 | agents-autoregistry: load subagents from `agents/<name>/AGENT.md` (replaces hardcoded summarizer) | passed-infra-skipped | —           |
+| T05 | tool-call parent linking: group tool calls under their assistant message in the UI   | passed               | —           |
+| T06 | tool-call history persistence: restore tool calls after refresh                      | passed               | T05         |
+| T07 | markdown rendering: render assistant prose as styled markdown, not raw text          | passed               | —           |
 
 ### Predecessor (closed, not numbered)
 
@@ -58,7 +61,16 @@ T01 onward. New tasks follow the single-file USDL template.
   heartbeat-dispatch fix plus a default-timeout bump; T04 ships a
   subagent autoregistry that replaces the hardcoded summarizer.
   Any can land first; all four can run concurrently against `master`.
-- **File ownership across the four tasks has minimal overlap.** T01
+- **T05 and T07 are independent of each other and of T01-T04.** T06
+  depends on T05 (shared `parentMessageId` invariant on tool-call
+  events). The recommended order is T05 → T06 sequentially, with T07
+  landing in parallel with either. T07 is a pure-frontend change
+  (markdown rendering) and has no cross-task file overlap with T05 /
+  T06 on the frontend (T05 touches `frontend/src/lib/reducer.ts` and
+  `types.ts`; T06 touches `reducer.ts:persistedToMessageView`,
+  `types.ts`, and `lib/api.ts`; T07 touches `package.json`,
+  `MarkdownContent.tsx` (new), and `AssistantBubble.tsx`).
+- **File ownership across all seven tasks has minimal overlap.** T01
   owns `src/shared/`, `src/runner_mgmt/warm_idle.py`,
   `src/runner_mgmt/registry.py`, `src/db/models.py`, and the
   cap-rejection branch of `src/api/internal.py` (~lines 190+) plus
@@ -81,7 +93,84 @@ T01 onward. New tasks follow the single-file USDL template.
   USDL changes touch disjoint Element ids so a merge is
   non-conflicting (T04 adds a new `cmp.runner.agents-loader` element
   and edits the `cmp.runner.entrypoint` structure block in a region
-  T03 does not touch).
+  T03 does not touch). T05 owns `runner/hooks/audit.py`,
+  `runner/agent_factory.py` (AG-UI wrap region only),
+  `src/api/webhooks.py` (tool-call.started branch),
+  `src/streaming/normalize.py`, `frontend/src/lib/reducer.ts`
+  (TOOL_CALL_START + ToolCallDenied handlers), and
+  `frontend/src/lib/types.ts` (AG-UI event field). T06 owns a new
+  `migrations/versions/*_tool_calls.py` migration, a new `ToolCall`
+  ORM model in `src/db/models.py`, a new `src/repos/tool_calls.py`,
+  the tool-call branches inside `src/api/stream.py:_persist_events`,
+  the response-extension block inside `src/api/sessions.py:list_messages`,
+  the `MessageOut` Pydantic schema, the `PersistedMessage` /
+  `PersistedToolCall` types and `persistedToMessageView` in the
+  frontend. T07 owns `frontend/package.json`, `frontend/package-lock.json`,
+  the new `frontend/src/components/MarkdownContent.tsx`, and the
+  message-content branch (lines ~52-57) of
+  `frontend/src/components/AssistantBubble.tsx`. T05 / T06 share
+  ownership of `frontend/src/lib/reducer.ts` but at distinct
+  function scopes (T05 → reducer event handlers; T06 →
+  `persistedToMessageView`) and `frontend/src/lib/types.ts` at
+  distinct types (T05 → AG-UI event types; T06 → `PersistedMessage`
+  / `PersistedToolCall`); merges are non-conflicting if landed
+  sequentially.
+
+## Standing verification conventions (apply to every task)
+
+These conventions are written once here and referenced (not re-stated) by
+every per-task `<VERIFICATION>` block from T05 onward. T01-T04 predate
+the conventions; their verification blocks already inline the relevant
+discipline.
+
+- **Docker image rebuild is mandatory before any runtime verification.**
+  Before running integration tests, Chrome MCP checks, or `curl` /
+  `docker exec` probes against a running container, the verifier MUST
+  rebuild the affected images and force-recreate the containers from the
+  just-built images. The exact commands depend on which images the task
+  touches; for a task affecting backend + runner + frontend the
+  invocation is:
+  ```bash
+  docker compose build backend runner frontend
+  docker compose up -d --force-recreate backend runner frontend
+  docker compose ps   # verify "running" status with fresh image digest
+  docker compose images backend runner frontend  # CREATED timestamp must be from THIS run
+  ```
+  A verifier that runs runtime checks against a stale cached image (or
+  against a `docker compose up` that did not rebuild) MUST fail the task
+  with diagnostics. The cost of one extra rebuild is dwarfed by the
+  debugging cost of "the test passed but the deployed code is from
+  yesterday".
+
+- **UI verification uses Chrome MCP tools (`mcp__claude-in-chrome__*`).**
+  Whenever a task changes frontend behaviour, the `<VERIFICATION>` block
+  includes at least one Chrome MCP check that:
+  1. Opens the freshly-rebuilt frontend container's URL via
+     `mcp__claude-in-chrome__tabs_create_mcp` / `navigate`.
+  2. Drives the UI through the change-under-test (sending a prompt,
+     reloading a session, etc.).
+  3. Asserts on the rendered DOM via `mcp__claude-in-chrome__find` +
+     `mcp__claude-in-chrome__javascript_tool` (with stable
+     `data-test="..."` selectors — never on Tailwind class strings).
+  4. Captures a `mcp__claude-in-chrome__gif_creator` recording of the
+     interaction, attached to the task closure note for human review.
+  5. Reads `mcp__claude-in-chrome__read_console_messages` and asserts
+     the absence of any console errors / regression warnings the task
+     intentionally introduces (e.g. the strict-drop console.warn from
+     T05's reducer).
+  Unit tests, integration tests, and `curl`-based API checks remain the
+  primary correctness signal for backend behaviour; Chrome MCP exists
+  specifically to verify rendered UI semantics that DOM-snapshot tests
+  cannot reliably capture (visual grouping, streaming behaviour, markdown
+  output, etc.).
+
+- **Cross-task verification re-runs.** A task that touches the frontend
+  rendering surface MUST, as its final verification step, re-run the
+  Chrome MCP checks from any other shipped UI-touching task to confirm
+  no regression. E.g. T07 (markdown) re-runs T05's grouping check and
+  T06's history-reload check against the T07 frontend image. This
+  applies to UI tasks only; backend-only tasks do not need to re-run
+  UI checks.
 
 ## Spec-amendment policy
 
@@ -103,6 +192,10 @@ T03 has no cross-repo dependencies.
 
 T04 has no cross-repo dependencies. The `agents/` directory and
 `kloc-agents` named volume are local to this repo.
+
+T05, T06, and T07 have no cross-repo dependencies. All three are
+self-contained within this repo (runner + backend + frontend +
+migrations + docs).
 
 ## Open Items roll-up
 
@@ -135,6 +228,29 @@ belongs to:
   orchestrator's AG-UI stream (empirical check on a non-summarizer
   subagent); migration path to Strands `graph` orchestration once
   ≥3 deterministically-routed subagents land.
+- **T05:** Strands hook surface — does `MessageStartEvent` /
+  `MessageStopEvent` fire synchronously before AG-UI emission, or do
+  we need to wrap `agui_emit` with a closure that snoops
+  `TEXT_MESSAGE_START` / `TEXT_MESSAGE_END`? Verify against
+  `docs/research/02-backend-agui.md` before implementation.
+  Webhook-payload schema versioning for the new optional
+  `parent_message_id` field (follows T02's "additive, no version
+  bump" precedent unless a versioning policy lands first).
+- **T06:** result-size persistence policy — truncate to
+  `KLOC_TOOL_LIMITS.result_max_bytes` in the DB row (chosen) vs.
+  offload to an artifact row and store a pointer (deferred); `seq`
+  allocation race within a parent message (chosen: tolerate
+  duplicate seq, tie-break by created_at; alternative: advisory
+  lock); whether to introduce a frontend unit-test runner
+  (vitest + react-testing-library) as a sibling task so future UI
+  changes have a faster signal than Chrome MCP.
+- **T07:** syntax highlighting via `shiki` (deferred until UX
+  research justifies the bundle cost); whether to ship
+  `isomorphic-dompurify` as a safety lever even without importing it
+  (chosen yes; revisit if bundle-size pressure increases); whether
+  user-bubble (`AnalystBubble.tsx`) should also render markdown
+  (deferred until analysts ask for it); memoisation of the markdown
+  render across streamed deltas (defer; profile first).
 
 None of the open items block the verification checks listed in each
 task's `<VERIFICATION>` block. They surface during the task's review

@@ -106,6 +106,7 @@ async def test_session_create_get_close(db_session) -> None:
 
     await repo.close(row.id)
     await db_session.commit()
+    db_session.expunge_all()
 
     got2 = await repo.get(row.id)
     assert got2 is not None
@@ -148,6 +149,7 @@ async def test_append_delta_concats_server_side(db_session) -> None:
 
     await m_repo.finalize(msg.id, token_count=2)
     await db_session.commit()
+    db_session.expunge_all()
 
     got2 = await m_repo.get(msg.id)
     assert got2 is not None
@@ -260,6 +262,7 @@ async def test_sweep_orphaned_messages_marks_stream_orphaned(db_session) -> None
         count = await sweep_orphaned_messages(conn)
 
     assert count == 1
+    db_session.expunge_all()
     refreshed = await m_repo.get(orphan.id)
     assert refreshed is not None
     assert refreshed.finalized_at is not None

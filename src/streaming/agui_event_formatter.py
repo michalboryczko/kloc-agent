@@ -24,7 +24,14 @@ except ImportError:
 
 
 def normalize(event: Any) -> dict:
-    """Coerce any AG-UI event representation into a wire-ready dict."""
+    """Coerce any AG-UI event representation into a wire-ready dict.
+
+    Pass-through semantics: unknown keys (e.g. `parentMessageId` on
+    `TOOL_CALL_START` / `CUSTOM ToolCallDenied`) survive intact. The
+    parent-linking pipeline depends on this — the runner stamps the
+    field, the backend forwards it verbatim, the FE reducer groups
+    tool cards under the named assistant Message.
+    """
     if BaseEvent is not None and isinstance(event, BaseEvent):
         d = event.model_dump(by_alias=True, exclude_none=True)
     elif isinstance(event, dict):

@@ -47,7 +47,7 @@
         consumes="evt.message-submitted">
     <description>Per-Session container running `python -m runner` under
     `opentelemetry-instrument`. Reads its HydrationPayload from
-    `/run/kloc/<runner_id>.json` (RO bind-mount), opens MCP clients,
+    `/run/kloc/&lt;runner_id&gt;.json` (RO bind-mount), opens MCP clients,
     builds a Strands `Agent` wrapped by `ag_ui_strands.StrandsAgent`,
     long-polls the backend inbox for user-message frames, runs each
     turn, and streams AG-UI events back over a chunked NDJSON POST.
@@ -87,7 +87,7 @@
   <unit id="top.hydration-volume" kind="object-store" owner="kloc-team">
     <description>Docker-managed named volume `kloc-hydration` mounted
     `/tmp/kloc-hydration` (backend, RW) and `/run/kloc` (each runner,
-    RO). Backend writes one `<runner_id>.json` per spawn; the runner
+    RO). Backend writes one `&lt;runner_id&gt;.json` per spawn; the runner
     reads it once at startup. Named-volume rather than bind-mount
     because the backend container's relative paths don't resolve on
     the host the way aiodocker sees them.</description>
@@ -319,9 +319,9 @@
                  mode="sync-request-response"
                  consistency="strong"
                  delivery="not-applicable">
-    <note>Backend writes `<runner_id>.json` to
+    <note>Backend writes `&lt;runner_id&gt;.json` to
     `/tmp/kloc-hydration/` before each spawn so the runner can read
-    it at `/run/kloc/<runner_id>.json` on first boot. Written once
+    it at `/run/kloc/&lt;runner_id&gt;.json` on first boot. Written once
     per spawn, never updated.</note>
   </communication>
 

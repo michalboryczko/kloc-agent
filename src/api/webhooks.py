@@ -167,7 +167,13 @@ async def receive_runner_event(
     # decision in the SAME transaction.
     session_id = _parse_uuid(body.get("session_id"))
     payload = body.get("payload") or {}
-    message_id = _parse_uuid(payload.get("message_id"))
+    # Artifact webhooks key off `message_id`; tool-call webhooks carry
+    # `parent_message_id` set by the runner's AG-UI emitter wrapper so
+    # the persister can resolve `tool_calls.parent_message_id` without
+    # replaying the event stream.
+    message_id = _parse_uuid(payload.get("message_id")) or _parse_uuid(
+        payload.get("parent_message_id")
+    )
     audit_event = _audit_event_name(event_name, decision.get("decision"))
 
     # ArtifactRegistered: insert artifact_metadata idempotently. The

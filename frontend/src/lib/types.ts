@@ -27,6 +27,19 @@ export interface SessionDetail {
 
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 
+export interface PersistedToolCall {
+  tool_call_id: string;
+  tool_name: string;
+  args: string;
+  result: string | null;
+  state: "running" | "done" | "denied";
+  denied_reason: string | null;
+  denied_hint: string | null;
+  seq: number;
+  created_at: string;
+  finalized_at: string | null;
+}
+
 export interface PersistedMessage {
   id: string;
   session_id: string;
@@ -37,6 +50,7 @@ export interface PersistedMessage {
   seq: number;
   created_at: string;
   finalized_at: string | null;
+  tool_calls?: PersistedToolCall[];
 }
 
 export interface MessagesPage {
@@ -136,7 +150,12 @@ export interface StateSnapshotEvent extends BaseEvent<"STATE_SNAPSHOT"> {
 
 export interface ToolCallDeniedCustom extends BaseEvent<"CUSTOM"> {
   name: "ToolCallDenied";
-  value: { toolCallId: string; toolName: string; reason: string };
+  value: {
+    toolCallId: string;
+    toolName: string;
+    reason: string;
+    parentMessageId?: string;
+  };
 }
 
 export interface ArtifactAttachedCustom extends BaseEvent<"CUSTOM"> {

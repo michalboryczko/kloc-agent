@@ -27,7 +27,19 @@ export function persistedToMessageView(m: PersistedMessage): MessageView {
     role: m.role,
     content: m.content ?? "",
     finalized: m.finalized_at !== null,
-    toolCalls: [],
+    toolCalls: (m.tool_calls ?? []).map((t) => ({
+      id: t.tool_call_id,
+      name: t.tool_name,
+      args: t.args ?? "",
+      state: t.state,
+      result: t.result ?? undefined,
+      meta: buildToolMeta(
+        t.state,
+        t.result ?? undefined,
+        t.denied_reason ?? undefined,
+        t.denied_hint ?? undefined,
+      ),
+    })),
     artifacts: [],
     created_at: m.created_at,
     seq: m.seq,
@@ -84,8 +96,21 @@ function ensureAssistantMessage(
   return { messages: messages.concat(created), index: messages.length };
 }
 
-function buildToolMeta(state: ToolCallView["state"], result?: string): string {
-  if (state === "denied") return "DENIED";
+function buildToolMeta(
+  state: ToolCallView["state"],
+  result?: string,
+  deniedReason?: string,
+  deniedHint?: string,
+): string {
+  if (state === "denied") {
+    // History-reload path surfaces reason/hint pulled from the persisted
+    // row; the live-streaming path passes neither so the "DENIED" label
+    // continues to fire unchanged.
+    const parts: string[] = ["DENIED"];
+    if (deniedReason) parts.push(deniedReason);
+    if (deniedHint) parts.push(deniedHint);
+    return parts.join(" · ");
+  }
   if (state === "running") return "running…";
   if (!result) return "ok";
   const trimmed = result.trim();
@@ -190,11 +215,13 @@ function applyAGUIEvent(
       } else {
         parentIdx = findOpenAssistantIndex(workingMessages);
         if (parentIdx === -1) {
-          const synthetic = makeAssistantMessage(
-            `assistant:${event.toolCallId}`,
-          );
-          workingMessages = workingMessages.concat(synthetic);
-          parentIdx = workingMessages.length - 1;
+          if (typeof console !== "undefined") {
+            console.warn(
+              "reducer.tool_call_start.no_parent",
+              { toolCallId: event.toolCallId, toolName: event.toolCallName },
+            );
+          }
+          return { ...state, lastEventSeq: baseLastSeq };
         }
       }
       const parent = workingMessages[parentIdx];
@@ -351,14 +378,25 @@ function applyCustom(
       };
     }
     let workingMessages = state.messages;
-    let parentIdx = findOpenAssistantIndex(workingMessages);
-    if (parentIdx === -1) {
-      parentIdx = findLastAssistantIndex(workingMessages);
+    let parentIdx = -1;
+    if (value.parentMessageId) {
+      const r = ensureAssistantMessage(workingMessages, value.parentMessageId);
+      workingMessages = r.messages;
+      parentIdx = r.index;
+    } else {
+      parentIdx = findOpenAssistantIndex(workingMessages);
+      if (parentIdx === -1) {
+        parentIdx = findLastAssistantIndex(workingMessages);
+      }
     }
     if (parentIdx === -1) {
-      const synthetic = makeAssistantMessage(`assistant:${value.toolCallId}`);
-      workingMessages = workingMessages.concat(synthetic);
-      parentIdx = workingMessages.length - 1;
+      if (typeof console !== "undefined") {
+        console.warn(
+          "reducer.tool_call_denied.no_parent",
+          { toolCallId: value.toolCallId, toolName: value.toolName },
+        );
+      }
+      return { ...state, lastEventSeq };
     }
     const parent = workingMessages[parentIdx];
     const synthetic: ToolCallView = {
