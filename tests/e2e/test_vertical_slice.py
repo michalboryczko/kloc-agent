@@ -131,18 +131,26 @@ async def test_scenario_01_vertical_slice(
     )
 
     # 7. At least one tool_name in audit payloads matches kloc_* (MCP) OR
-    #    summarizer (sub-agent). qa-notes §4 Scenario 1 "Then" requires
-    #    BOTH; we loosen to "either" to absorb LLM-route variance and
-    #    still fail loudly if neither hit (which would prove the agent
-    #    loop didn't exercise the right tools).
+    #    a subagent autoregistered from `agents/<name>/AGENT.md`. qa-notes
+    #    §4 Scenario 1 "Then" requires BOTH; we loosen to "either" to
+    #    absorb LLM-route variance and still fail loudly if neither hit
+    #    (which would prove the agent loop didn't exercise the right
+    #    tools).
+    from pathlib import Path
+
+    from runner.agents_loader import discover_agents
+
+    discovered = discover_agents(Path("./agents"))
+    subagent_names = {a.name for a in discovered}
     tool_names = [
         (r.payload or {}).get("payload", {}).get("tool_name", "")
         for r in audit_rows
         if r.event_type == TOOL_CALL_STARTED
     ]
     assert any(
-        tn.startswith("kloc_") or tn == "summarizer" for tn in tool_names
+        tn.startswith("kloc_") or tn in subagent_names for tn in tool_names
     ), (
-        f"expected at least one kloc_* MCP tool OR summarizer sub-agent; "
+        f"expected at least one kloc_* MCP tool OR an autoregistered "
+        f"sub-agent (one of {sorted(subagent_names)}); "
         f"audit tool_names: {tool_names}"
     )

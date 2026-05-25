@@ -6,14 +6,36 @@ at startup rather than on first request.
 """
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from typing import Annotated, Literal
+from urllib.parse import urlparse, urlunparse
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 LlmProvider = Literal["gemini"]
+
+
+class FileReadLimits(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    max_bytes: int | None = None
+
+
+class KlocFlowsLimits(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    require_bounded: bool = False
+    max_results: int | None = None
+
+
+class ToolLimitsConfig(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    file_read: FileReadLimits | None = None
+    kloc_flows: KlocFlowsLimits | None = None
 
 
 class Settings(BaseSettings):
@@ -45,7 +67,9 @@ class Settings(BaseSettings):
     )
 
     runner_warm_idle_s: int = 60
-    runner_heartbeat_timeout_s: int = 30
+    # Sized to clear cold MCP-init + Strands+skills build on a moderately
+    # loaded host. Reduce only when the host is known idle.
+    runner_heartbeat_timeout_s: int = 60
     runner_image_tag: str = "kloc-agent-runner:dev"
 
     # Default matches the explicit `networks.kloc.name: kloc` block in
@@ -54,6 +78,7 @@ class Settings(BaseSettings):
     # (COMPOSE_PROJECT_NAME doesn't apply to explicit-name networks).
     kloc_docker_network: str = "kloc"
     kloc_skills_dir_host: str = "./skills"
+    kloc_agents_dir_host: str = "./agents"
 
     llm_provider: LlmProvider = "gemini"
     gemini_api_key: str | None = None
@@ -99,6 +124,41 @@ class Settings(BaseSettings):
     @property
     def deny_tools_set(self) -> set[str]:
         return {t.strip() for t in self.kloc_deny_tools.split(",") if t.strip()}
+
+    tool_limits: Annotated[ToolLimitsConfig, NoDecode] = Field(
+        default_factory=ToolLimitsConfig,
+        validation_alias=AliasChoices("tool_limits", "KLOC_TOOL_LIMITS"),
+        description=(
+            "JSON-typed per-tool argument-aware policy budget. Empty / unset "
+            "means no per-tool caps are enforced (allow). Example: "
+            '{"file_read":{"max_bytes":262144},'
+            '"kloc_flows":{"require_bounded":true,"max_results":200}}.'
+        ),
+    )
+
+    @field_validator("tool_limits", mode="before")
+    @classmethod
+    def _parse_tool_limits(cls, v: object) -> object:
+        if v is None or v == "":
+            return ToolLimitsConfig()
+        if isinstance(v, (dict, ToolLimitsConfig)):
+            return v
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
+
+    intelligence_stat_url: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "intelligence_stat_url", "KLOC_INTELLIGENCE_STAT_URL"
+        ),
+        description=(
+            "HTTP endpoint kloc-agent calls during BeforeToolCall policy "
+            "to size a path before letting `file_read` through. Defaults "
+            "to `kloc_mcp_url` with the path replaced by `/v1/file_stat` "
+            "when unset."
+        ),
+    )
 
     # `NoDecode` opts out of pydantic-settings' built-in JSON decoding for
     # complex types. Without it, a raw string env value like
@@ -179,6 +239,11 @@ class Settings(BaseSettings):
 
         if not self.llm_model_id:
             object.__setattr__(self, "llm_model_id", "gemini-3.1-pro-preview")
+
+        if not self.intelligence_stat_url:
+            parsed = urlparse(self.kloc_mcp_url)
+            derived = urlunparse(parsed._replace(path="/v1/file_stat"))
+            object.__setattr__(self, "intelligence_stat_url", derived)
         return self
 
 

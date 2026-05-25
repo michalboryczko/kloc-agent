@@ -35,6 +35,12 @@ RUNNER_HEARTBEAT_LOST: Final = "runner_heartbeat_lost"
 # Artifacts
 ARTIFACT_REGISTERED: Final = "artifact_registered"
 
+# Runner channel
+RUNNER_CHANNEL_FRAME_REJECTED: Final = "runner_channel_frame_rejected"
+
+# Subagent autoregistry
+RUNNER_SUBAGENT_LOAD_FAILED: Final = "runner_subagent_load_failed"
+
 
 ALL_EVENTS: Final[frozenset[str]] = frozenset(
     {
@@ -50,6 +56,8 @@ ALL_EVENTS: Final[frozenset[str]] = frozenset(
         RUNNER_WARM_IDLE_EVICTED,
         RUNNER_HEARTBEAT_LOST,
         ARTIFACT_REGISTERED,
+        RUNNER_CHANNEL_FRAME_REJECTED,
+        RUNNER_SUBAGENT_LOAD_FAILED,
     }
 )
-"""All 12 locked audit event names. Use to detect spec drift."""
+"""Locked audit event names. Use to detect spec drift."""

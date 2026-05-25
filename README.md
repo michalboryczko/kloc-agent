@@ -53,7 +53,8 @@ uv run pytest -m e2e         # full compose + real Anthropic + Docker runner
 ```
 src/        backend (FastAPI + SQLAlchemy + aioboto3)
 runner/     in-container Strands Agent runtime
-skills/     bind-mounted into runners
+skills/     mounted read-only into runners (named volume kloc-skills)
+agents/     mounted read-only into runners (named volume kloc-agents); autoregistered subagents
 frontend/   Next.js + CopilotKit + AG-UI
 migrations/ Alembic async
 tests/      unit / integration / e2e
@@ -64,6 +65,10 @@ docs/       specs, architecture, research
 
 - skills/ is bind-mounted **read-only**; mutating it requires dropping
   in-flight sessions (research/04 risk R6d).
+- agents/ holds one `AGENT.md` per subagent (frontmatter `name` +
+  `description`, body is the system prompt). The runner discovers them
+  at startup via `runner/agents_loader.py` and exposes each as a
+  delegated tool. Adding a subagent is drop-a-file + runner restart.
 - Per-session Docker runners are spawned by the backend via aiodocker.
   They are NOT declared in docker-compose; the backend talks to the
   Docker socket on the host.

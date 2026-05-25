@@ -7,6 +7,12 @@ backend writes `<runner_id>.json` to the volume; the runner reads it via
 forwards bind sources to the host Docker daemon, which resolves them
 host-side — files written inside the backend container do not exist on
 the host.
+
+The same module also builds the read-only named-volume Mount dicts that
+surface the runner-side `/skills` and `/agents` trees. Both follow the
+same shape: a compose-managed named volume (`kloc-skills`, `kloc-agents`)
+seeded by a one-shot init sidecar from the repo-root `./skills/` and
+`./agents/` directories.
 """
 
 from __future__ import annotations
@@ -126,5 +132,19 @@ def build_skills_mount(host_skills_dir: str) -> dict:
         "Type": "volume",
         "Source": os.environ.get("KLOC_SKILLS_VOLUME", "kloc-skills"),
         "Target": "/skills",
+        "ReadOnly": True,
+    }
+
+
+def build_agents_mount() -> dict:
+    """Subagents directory mount via shared named volume `kloc-agents`.
+
+    Parallel to `build_skills_mount`. The named-volume approach is the
+    structural fix for the bind-from-compose vs aiodocker
+    path-resolution mismatch already documented for `/skills`."""
+    return {
+        "Type": "volume",
+        "Source": os.environ.get("KLOC_AGENTS_VOLUME", "kloc-agents"),
+        "Target": "/agents",
         "ReadOnly": True,
     }

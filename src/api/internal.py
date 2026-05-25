@@ -6,8 +6,10 @@ Localhost-only inside the compose bridge; no public auth.
 
 Owns the transport: parse JSONL frames off the wire and publish AG-UI
 events into the in-proc `EventBus` keyed by `(session_id, run_id)`.
-Lifecycle frames (`heartbeat`, `RunnerHeartbeat`) reset the runner
-registry's heartbeat watcher; everything else flows to the bus.
+Lifecycle frames (`heartbeat`, `RunnerHeartbeat`, `runner_ready`) reset
+the runner registry's heartbeat watcher; everything else flows to the
+bus. `runner_ready` is the runner's very first emitted frame and counts
+as the cold-start beat at the ingress.
 
 AG-UI events carry `runId` (camelCase); runner-internal liveness frames
 carry `type: "heartbeat"`.
@@ -21,19 +23,81 @@ import functools
 import json
 import logging
 import sys
+import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse, Response
 from starlette.requests import ClientDisconnect
 
 from src.settings import get_settings
+from src.shared.transport_limits import MAX_LINE_BYTES
 from src.streaming.execution_registry import execution_registry
 
 
 router = APIRouter(tags=["internal"])
 log = logging.getLogger("kloc_agent.internal")
+
+
+_BEAT_FRAME_TYPES = frozenset({"heartbeat", "RunnerHeartbeat", "runner_ready"})
+
+
+try:
+    from opentelemetry import metrics as _otel_metrics
+
+    _meter = _otel_metrics.get_meter("kloc_agent.runner.channel")
+    _frame_rejected_counter = _meter.create_counter(
+        "kloc_agent.runner.frame_rejected_total",
+        description="Inbound runner JSONL frames dropped at the ingress cap-check boundary.",
+    )
+    _frame_bytes_histogram = _meter.create_histogram(
+        "kloc_agent.runner.frame_bytes",
+        description="Byte size of inbound runner JSONL frames at the ingress cap-check boundary.",
+        unit="By",
+    )
+    _spawn_to_first_beat_hist = _meter.create_histogram(
+        "kloc_agent.runner.spawn_to_first_beat_s",
+        description=(
+            "Seconds from runner_spawned audit emit to the first "
+            "beat-equivalent frame (runner_ready / heartbeat / "
+            "RunnerHeartbeat) on the JSONL ingress."
+        ),
+        unit="s",
+    )
+except Exception:  # pragma: no cover - OTel absence must not crash boot
+    _frame_rejected_counter = None
+    _frame_bytes_histogram = None
+    _spawn_to_first_beat_hist = None
+
+
+_runner_spawn_ts: dict[str, float] = {}
+_first_beat_recorded: set[str] = set()
+
+
+def record_runner_spawned(session_id: str) -> None:
+    """Stamp `time.monotonic()` so the ingress can compute spawn→first-beat.
+
+    Called from the registry at the same point the `runner_spawned`
+    audit row is emitted. Process-local — single uvicorn worker.
+    """
+    _runner_spawn_ts[session_id] = time.monotonic()
+    _first_beat_recorded.discard(session_id)
+
+
+def _maybe_record_first_beat(session_id: str) -> None:
+    if session_id in _first_beat_recorded:
+        return
+    spawn_ts = _runner_spawn_ts.get(session_id)
+    if spawn_ts is None:
+        return
+    elapsed = time.monotonic() - spawn_ts
+    _first_beat_recorded.add(session_id)
+    if _spawn_to_first_beat_hist is not None:
+        try:
+            _spawn_to_first_beat_hist.record(elapsed)
+        except Exception:  # pragma: no cover - metric backend optional
+            log.exception("spawn_to_first_beat_hist_failed")
 
 
 @functools.lru_cache(maxsize=1)
@@ -70,9 +134,11 @@ async def _stamp_seq_and_publish(
 async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> None:
     """Route one JSONL frame to the right consumer.
 
-    - `type: "heartbeat"` / `"RunnerHeartbeat"` →
+    - `type: "heartbeat"` / `"RunnerHeartbeat"` / `"runner_ready"` →
       `RunnerRegistry.on_heartbeat_frame(session_id)`. Never published
       to the event bus — these are liveness signals, not AG-UI events.
+      `runner_ready` is the runner's first emitted frame and counts as
+      the cold-start beat.
     - `type: "RUN_FINISHED"` → also notify
       `RunnerRegistry.on_run_finished` so the warm-idle countdown
       starts; the frame is also published to the event bus so SSE
@@ -87,7 +153,8 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
         f"frame: type={frame_type} run_id={run_id} session_id={session_id}"
     )
 
-    if frame_type in ("heartbeat", "RunnerHeartbeat"):
+    if frame_type in _BEAT_FRAME_TYPES:
+        _maybe_record_first_beat(session_id)
         on_hb = getattr(registry, "on_heartbeat_frame", None) if registry else None
         if on_hb is not None:
             try:
@@ -192,14 +259,62 @@ async def _dispatch_frame(request: Request, session_id: str, frame: dict) -> Non
             active_by_session.pop(session_id, None)
 
 
-# Per-line cap on JSONL frames. 1 MiB is generous for AG-UI events;
-# anything larger is almost certainly a runaway or attack.
-MAX_LINE_BYTES = 1 * 1024 * 1024
-
 # Cap on frames buffered per-session before RUN_STARTED is observed.
 # Bounded so a misbehaving runner that never emits RUN_STARTED cannot
 # OOM the backend.
 _PRE_RUN_BUFFER_CAP = 1024
+
+
+async def _emit_frame_rejected(
+    request: Request,
+    session_id: str,
+    *,
+    cause: str,
+    upstream_status: int,
+    byte_size: int,
+) -> None:
+    """Audit + OTel signals on a dropped inbound frame.
+
+    The runner-id header is the source of truth for which runner sent
+    the rejected bytes; the run_id is unknown at the cap-check boundary
+    because the frame was never parsed.
+    """
+    runner_id = request.headers.get("X-Kloc-Runner-Id") or ""
+    payload = {
+        "session_id": session_id,
+        "runner_id": runner_id,
+        "run_id": None,
+        "cause": cause,
+        "upstream_status": upstream_status,
+        "byte_size": byte_size,
+    }
+    if _frame_rejected_counter is not None:
+        try:
+            _frame_rejected_counter.add(1, {"cause": cause})
+        except Exception:  # pragma: no cover - metric backend optional
+            log.exception("frame_rejected_counter_failed")
+    if _frame_bytes_histogram is not None:
+        try:
+            _frame_bytes_histogram.record(byte_size)
+        except Exception:  # pragma: no cover
+            log.exception("frame_bytes_histogram_failed")
+    audit_emit = getattr(request.app.state, "audit_emit", None)
+    if audit_emit is not None:
+        try:
+            await audit_emit("runner_channel_frame_rejected", payload)
+        except Exception:  # pragma: no cover - audit best-effort
+            log.exception("audit_emit_frame_rejected_failed")
+
+
+def _oversize_response(byte_size: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=413,
+        content={
+            "reason": "frame_oversized",
+            "byte_size": byte_size,
+            "cap": MAX_LINE_BYTES,
+        },
+    )
 
 
 @router.post(
@@ -243,40 +358,66 @@ async def ingest_runner_events(
                 if not line:
                     continue
                 if len(line) > MAX_LINE_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"JSONL frame exceeds {MAX_LINE_BYTES} bytes",
+                    await _emit_frame_rejected(
+                        request,
+                        sid,
+                        cause="frame_oversized",
+                        upstream_status=413,
+                        byte_size=len(line),
                     )
+                    return _oversize_response(len(line))
+                if _frame_bytes_histogram is not None:
+                    try:
+                        _frame_bytes_histogram.record(len(line))
+                    except Exception:  # pragma: no cover
+                        log.exception("frame_bytes_histogram_failed")
                 try:
                     frame = json.loads(line)
                 except json.JSONDecodeError as e:
                     _diag(f"parse fail: line={line[:200]!r} err={e}")
-                    raise HTTPException(
-                        status_code=400, detail="invalid JSONL frame"
+                    return JSONResponse(
+                        status_code=400,
+                        content={"reason": "invalid_jsonl"},
                     )
                 count += 1
                 await _dispatch_frame(request, sid, frame)
             if len(buf) > MAX_LINE_BYTES:
                 # Pending line (no newline yet) already over cap — fail fast
                 # so we don't accumulate bytes indefinitely.
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"JSONL frame exceeds {MAX_LINE_BYTES} bytes",
+                await _emit_frame_rejected(
+                    request,
+                    sid,
+                    cause="frame_oversized",
+                    upstream_status=413,
+                    byte_size=len(buf),
                 )
+                return _oversize_response(len(buf))
 
         # Final flush — handle a trailing line without a newline.
         buf = buf.strip()
         if buf:
             if len(buf) > MAX_LINE_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"JSONL frame exceeds {MAX_LINE_BYTES} bytes",
+                await _emit_frame_rejected(
+                    request,
+                    sid,
+                    cause="frame_oversized",
+                    upstream_status=413,
+                    byte_size=len(buf),
                 )
+                return _oversize_response(len(buf))
+            if _frame_bytes_histogram is not None:
+                try:
+                    _frame_bytes_histogram.record(len(buf))
+                except Exception:  # pragma: no cover
+                    log.exception("frame_bytes_histogram_failed")
             try:
                 frame = json.loads(buf)
             except json.JSONDecodeError as e:
                 _diag(f"parse fail (final): line={buf[:200]!r} err={e}")
-                raise HTTPException(status_code=400, detail="invalid JSONL frame")
+                return JSONResponse(
+                    status_code=400,
+                    content={"reason": "invalid_jsonl"},
+                )
             count += 1
             await _dispatch_frame(request, sid, frame)
     except ClientDisconnect:

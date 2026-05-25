@@ -295,7 +295,7 @@
     <operation id="ifc.ingest-runner-events"
                contract="ifc.internal-runner-ingress"
                name="POST /internal/sessions/{session_id}/events"
-               intent="Receive the runner's chunked NDJSON stream of AG-UI frames plus liveness heartbeats; route each frame to the in-process EventBus and the ExecutionRegistry ring."
+               intent="Receive the runner's chunked NDJSON stream of AG-UI frames plus liveness heartbeats; route each frame to the in-process EventBus and the ExecutionRegistry ring. Per-line cap is 16 MiB (`MAX_LINE_BYTES`); the runner stays one MiB under at 15 MiB (`RUNNER_MAX_FRAME_BYTES`) so a frame that survives the runner-side check survives this one. Oversized payloads are routed through the artifact-upload path on the runner side; the backend never receives an inline body larger than 16 MiB. Beat-equivalent frames that reset the heartbeat watcher are `type: heartbeat`, `RunnerHeartbeat`, and `runner_ready`; the latter is the runner's first emitted frame and counts as the cold-start beat."
                mode="stream-push"
                consistency="eventual"
                delivery="at-least-once"
@@ -305,8 +305,8 @@
       <schema-ref role="event"  format="asyncapi"
                   uri="./schemas/agui-events.asyncapi.yaml#/channels/runner-ingress"/>
       <failure-mode condition="oversized-frame"
-                    caller-action="fail-fast"
-                    provider-promise="connection-closed"/>
+                    caller-action="drop-and-emit-run-error"
+                    provider-promise="returns-413-with-reason-frame-oversized-and-byte-size-emits-runner_channel_frame_rejected-audit-row"/>
       <failure-mode condition="invalid-jsonl"
                     caller-action="fail-fast"
                     provider-promise="connection-closed"/>
@@ -408,7 +408,7 @@
     <operation id="ifc.runner-webhook"
                contract="ifc.runner-webhooks"
                name="POST /v1/webhooks/runners/{runner_id}/events"
-               intent="Receive a Strands-lifecycle hook (BeforeToolCall / AfterToolCall / ArtifactRegistered), verify HMAC, run policy, persist an audit row, and return the policy decision."
+               intent="Receive a Strands-lifecycle hook (BeforeToolCall / AfterToolCall / ArtifactRegistered), verify HMAC, run policy, persist an audit row, and return the policy decision. On `BeforeToolCall` deny the response body MAY include an optional `hint: str` field — an actionable message the runner threads into the `ToolCallDenied` AG-UI event's `value` dict so the agent observes the denial reason as the tool result and can re-plan."
                mode="sync-request-response"
                consistency="strong"
                delivery="at-most-once"
@@ -439,6 +439,85 @@
                     provider-promise="effect-idempotent-on-retry"/>
     </operation>
   </contract>
+
+  <!-- ============================================================
+       Contract: kloc-intelligence file-stat HTTP endpoint. The
+       backend's BeforeToolCall policy layer reaches the
+       kloc-intelligence container directly on a non-MCP path to
+       size files before letting `file_read` calls through. The
+       provider is the kloc-intelligence container (out-of-repo);
+       the contract is documented here because the kloc-agent
+       backend is the consumer.
+       =========================== -->
+
+  <contract id="ifc.intel-stat"
+            provider="top.kloc-intelligence"
+            consumers="top.backend"
+            style="rest"
+            spec-ref="./schemas/intel-stat.openapi.json">
+
+    <operation id="ifc.intel-stat-file-stat"
+               contract="ifc.intel-stat"
+               name="GET /v1/file_stat?path={path}"
+               intent="Return `{exists: bool, size_bytes: int, is_file: bool}` for the given absolute path inside the kloc-intelligence-indexed workspace. JSON only, no MCP wrapping; used by the kloc-agent BeforeToolCall policy layer to size a file before letting `file_read` through."
+               mode="sync-request-response"
+               consistency="eventual"
+               delivery="at-most-once"
+               idempotency="not-applicable">
+      <failure-mode condition="path-missing"
+                    caller-action="treat-as-allow"
+                    provider-promise="returns-404-with-not-exists-payload"/>
+      <failure-mode condition="stat-timeout"
+                    caller-action="treat-as-allow-and-increment-stat_unavailable_total"
+                    provider-promise="no-side-effect-on-failure"/>
+      <failure-mode condition="provider-unreachable"
+                    caller-action="treat-as-allow-and-increment-stat_unavailable_total"
+                    provider-promise="no-side-effect-on-failure"/>
+    </operation>
+  </contract>
+
+  <!-- ============================================================
+       Element: agents mount surface. Read-only named-volume contract
+       between the backend (which seeds the volume from the repo-root
+       `./agents/` tree via the `agents-init` compose sidecar) and the
+       runner container (which consumes it via `cmp.runner.agents-loader`).
+       Not a wire protocol — a filesystem convention — hence an
+       `<element>` rather than a `<contract>`.
+       =========================== -->
+
+  <element id="ifc.agents-mount">
+    <intent>The runner-side `/agents` mount surfaces the autoregistry of
+    Strands subagents. Read-only named volume `kloc-agents`, seeded by
+    the `agents-init` compose sidecar from the repo-root `./agents/`
+    tree on first boot. The runner reads `/agents/&lt;name&gt;/AGENT.md`
+    files via `cmp.runner.agents-loader` at agent build time; each
+    successfully parsed file becomes a subagent the orchestrator
+    exposes as a tool.</intent>
+    <structure>
+      Files: `/agents/&lt;name&gt;/AGENT.md`. The `&lt;name&gt;` directory segment
+      is informational only — the canonical name comes from the
+      frontmatter so a directory rename does not silently re-key the
+      subagent.
+
+      Frontmatter schema (parsed by `AgentSpec`):
+        - `name: str` — `^[a-z][a-z0-9-]*$`, 1-64 chars. Becomes the
+          Strands `Agent.name` and therefore the tool name the
+          orchestrator's LLM uses to invoke the subagent. Must be
+          unique across the directory AND must not collide with any
+          MCP tool name advertised at runner startup.
+        - `description: str` — 1-1024 chars. The description the
+          orchestrator's LLM sees when deciding whether to delegate.
+
+      Body: the markdown following the closing `---` (leading
+      whitespace stripped) is the subagent's `system_prompt`. The
+      author owns it end-to-end — no template prefix or suffix is
+      injected.
+
+      Volume: Docker named volume `kloc-agents`, mounted read-only at
+      `/agents` on every runner container.
+    </structure>
+    <consumed-by>cmp.runner.agents-loader</consumed-by>
+  </element>
 
   <!-- ============================================================
        Contract F: liveness / readiness exposed by the backend to

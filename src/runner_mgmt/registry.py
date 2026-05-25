@@ -219,6 +219,13 @@ class RunnerRegistry:
         # callback re-acquires `_lock`.
         entry = await self._get_entry(session_id)
         if entry is not None:
+            # Cancel the countdown atomically as part of the reuse
+            # decision. Without this, the await below self-blocks for
+            # the entire warm-idle window because the countdown task
+            # only completes when the activity event is set, and that
+            # only happens once the message is forwarded to the runner
+            # — which the caller cannot do until this method returns.
+            entry.warm_idle.on_user_message()
             await entry.warm_idle.await_kill_in_flight()
             # After the kill task settles, the entry may already be gone
             # (`_on_evict` removed it). Re-fetch from the registry.
@@ -253,6 +260,12 @@ class RunnerRegistry:
                     "runner_id": getattr(handle, "runner_id", None),
                 },
             )
+        try:
+            from src.api.internal import record_runner_spawned
+
+            record_runner_spawned(session_id)
+        except Exception:  # pragma: no cover - telemetry is best-effort
+            log.exception("record_runner_spawned_failed")
         return new_entry
 
     async def _install_entry(

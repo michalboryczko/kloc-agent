@@ -399,8 +399,9 @@ async def _build_hydration_payload(
 
     base_prompt = (
         "You are a code-intelligence research agent. Use the available "
-        "MCP tools to look things up and the `summarizer` sub-agent for "
-        "final answers. Cite symbol FQNs verbatim."
+        "MCP tools to look things up and delegate to any sub-agents "
+        "listed among your tools when a specialist persona is a better "
+        "fit. Cite symbol FQNs verbatim."
     )
 
     # Agent reaches kloc-intelligence over Streamable HTTP MCP, not via

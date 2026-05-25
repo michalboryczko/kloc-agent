@@ -32,22 +32,42 @@ class WarmIdleManager:
         self._on_evict = on_evict
         self._activity = asyncio.Event()
         self._task: asyncio.Task | None = None
+        # Gates `await_kill_in_flight`: countdown-phase awaiters return
+        # immediately, terminate-phase awaiters block until terminate
+        # finishes. Flips True only after the activity-wait raises
+        # TimeoutError and before `terminate(handle)` is invoked.
+        self._killing: bool = False
 
     def on_run_finished(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
         self._activity.clear()
+        self._killing = False
         self._task = asyncio.create_task(self._await_idle_then_kill())
 
     def on_user_message(self) -> None:
         self._activity.set()
+        if self._killing:
+            # Terminate is already running; cancelling now would leave
+            # the container in a half-killed state and the registry
+            # entry stale. Let the kill complete; the caller's
+            # `await_kill_in_flight()` then settles cleanly and a
+            # fresh spawn replaces the zombie.
+            return
         if self._task and not self._task.done():
             self._task.cancel()
 
     async def await_kill_in_flight(self) -> None:
-        """If a warm-idle kill is mid-flight when a new user message
-        arrives, callers must `await` this before deciding spawn-vs-reuse.
-        Returns immediately if no kill is in progress."""
+        """Block only when a terminate is actually in flight.
+
+        During the countdown phase a new user message simply cancels
+        the timer; there is no kill to wait on. Awaiting `self._task`
+        in that phase would self-block for the whole warm-idle window
+        because the countdown only completes via the activity event,
+        which the caller has not yet set.
+        """
+        if not self._killing:
+            return
         task = self._task
         if task is None or task.done():
             return
@@ -70,6 +90,7 @@ class WarmIdleManager:
                 self._activity.wait(), timeout=self._warm_idle_s
             )
         except asyncio.TimeoutError:
+            self._killing = True
             log.info(
                 "warm_idle.evicting",
                 extra={"session_id": getattr(self._handle, "session_id", None)},

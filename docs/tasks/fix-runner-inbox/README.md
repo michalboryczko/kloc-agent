@@ -45,6 +45,19 @@ patch on the long-poll loop.
 - Implementation: **Closed** (2026-05-19) — 16 atomic commits on `master`, `7465f784e..1342e3289`
 - Acceptance: **PASS** — see QA sign-off above. Functional + structural + regression ACs all met. Bug class structurally eliminated.
 
+### Symptom-twin: post-PGMQ "second message does nothing"
+
+After this task closed, the same user-visible symptom resurfaced from a
+different root cause: `RunnerRegistry.get_or_spawn` was awaiting the
+warm-idle countdown task before forwarding the user message, so the
+handler self-blocked for the full warm-idle window. That regression is
+fixed under task **T01 — fix-runner-communication** (see
+[../T01.md](../T01.md) and
+[../../specs/fix-runner-communication.md](../../specs/fix-runner-communication.md)),
+which also addresses an unrelated oversized-frame channel-poisoning
+bug. Do NOT mistake this task for the active fix — the PGMQ inbox is
+working; T01 is the live remediation.
+
 ## Follow-up items
 
 Tracked for a future iteration; none of these blocked closing this task.

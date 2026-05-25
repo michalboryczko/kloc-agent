@@ -34,8 +34,10 @@ in the USDL plugin.
 
 | ID  | Title                                                                                | Status  | Depends on  |
 |-----|--------------------------------------------------------------------------------------|---------|-------------|
-| T01 | fix-runner-communication: warm-runner reuse hang + oversized-frame channel poisoning | pending | fix-runner-inbox (closed) |
-| T02 | tool-result-size-limits: argument-aware tool policy + actionable hints               | pending | —           |
+| T01 | fix-runner-communication: warm-runner reuse hang + oversized-frame channel poisoning | passed-infra-skipped | fix-runner-inbox (closed) |
+| T02 | tool-result-size-limits: argument-aware tool policy + actionable hints               | passed-infra-skipped | —           |
+| T03 | fix-runner-startup-heartbeat-race: first-heartbeat budget too tight for cold-start MCP init | passed-infra-skipped | —           |
+| T04 | agents-autoregistry: load subagents from `agents/<name>/AGENT.md` (replaces hardcoded summarizer) | passed-infra-skipped | —           |
 
 ### Predecessor (closed, not numbered)
 
@@ -51,15 +53,35 @@ T01 onward. New tasks follow the single-file USDL template.
 
 ## Parallelisation hint
 
-- **T01 and T02 are independent.** T02 ships a backend-side policy
-  layer; T01 ships transport-layer fixes. Either can land first; both
-  can run concurrently against `master`. T02 does not gate on T01.
-- **File ownership across T01 and T02 has no overlap.** T01 owns
-  `src/shared/`, `src/runner_mgmt/`, `src/api/internal.py`,
-  `runner/channel.py`, `src/db/models.py`. T02 owns `src/hooks_audit/`,
-  `runner/hooks/audit.py`, `src/settings.py`. The USDL Sections are
-  the only shared write surface; each task's USDL changes touch
-  disjoint Element ids so a merge is non-conflicting.
+- **T01, T02, T03, and T04 are independent.** T02 ships a backend-side
+  policy layer; T01 ships transport-layer fixes; T03 ships a
+  heartbeat-dispatch fix plus a default-timeout bump; T04 ships a
+  subagent autoregistry that replaces the hardcoded summarizer.
+  Any can land first; all four can run concurrently against `master`.
+- **File ownership across the four tasks has minimal overlap.** T01
+  owns `src/shared/`, `src/runner_mgmt/warm_idle.py`,
+  `src/runner_mgmt/registry.py`, `src/db/models.py`, and the
+  cap-rejection branch of `src/api/internal.py` (~lines 190+) plus
+  the offload + permanent-failure paths in `runner/channel.py`. T02
+  owns `src/hooks_audit/`, `runner/hooks/audit.py`, and adds fields
+  to `src/settings.py`. T03 owns `src/runner_mgmt/heartbeat.py`,
+  the `_heartbeat_loop` in `runner/channel.py`, the heartbeat
+  dispatch branch of `src/api/internal.py` (~line 109), the
+  `runner_heartbeat_timeout_s` default in `src/settings.py`, and
+  `.env` / `.env.example`. T04 owns `runner/agents_loader.py` (new),
+  the subagent construction block in `runner/agent_factory.py`, the
+  `agents_dir` field on `HydrationPayload` and the
+  `runner_subagent_load_failed` literal on `AuditEventType` in
+  `src/db/models.py`, `build_agents_mount` in
+  `src/runner_mgmt/hydrate.py`, the `Mounts` list in
+  `src/runner_mgmt/docker_runner.py`, `agents/summarizer/AGENT.md`
+  (new), the base prompt string in `src/api/stream.py`, and the
+  `agents-init` sidecar + `kloc-agents` volume in `docker-compose*.yml`.
+  The USDL Sections are the only shared write surface; each task's
+  USDL changes touch disjoint Element ids so a merge is
+  non-conflicting (T04 adds a new `cmp.runner.agents-loader` element
+  and edits the `cmp.runner.entrypoint` structure block in a region
+  T03 does not touch).
 
 ## Spec-amendment policy
 
@@ -77,6 +99,11 @@ separately. A fixture stat server (`tests/fixtures/intel_stat_server.py`)
 is the contract source of truth in this repo until the real endpoint
 lands.
 
+T03 has no cross-repo dependencies.
+
+T04 has no cross-repo dependencies. The `agents/` directory and
+`kloc-agents` named volume are local to this repo.
+
 ## Open Items roll-up
 
 PM decisions blocking task closure are listed in each task's
@@ -93,6 +120,21 @@ belongs to:
   under `beh.ask-assistant` for "tool denials carry an actionable
   hint the agent observes as the tool result"; audit payload schema
   versioning for the new `tool_limit:*` reason namespace.
+- **T03:** whether to tighten the 60 s default once
+  `kloc_agent.runner.spawn_to_first_beat_s` telemetry stabilises;
+  whether to extend the first-beat frame with structured
+  `mcp_init_ms` / `agent_build_ms` timings so operators can drill
+  into cold-start regressions; whether the `INJECT_RUNNER_INIT_DELAY_S`
+  test fixture should remain in the runner image after T03 closes
+  or move into a test-only Dockerfile overlay.
+- **T04:** per-subagent tool filtering via frontmatter `tools:`
+  allowlist (deferred until a specialist demonstrably suffers from
+  the full 22-tool MCP surface); per-subagent model override via
+  frontmatter `model_id:` (deferred until cost telemetry justifies);
+  whether subagent intermediate events propagate through the
+  orchestrator's AG-UI stream (empirical check on a non-summarizer
+  subagent); migration path to Strands `graph` orchestration once
+  ≥3 deterministically-routed subagents land.
 
 None of the open items block the verification checks listed in each
 task's `<VERIFICATION>` block. They surface during the task's review

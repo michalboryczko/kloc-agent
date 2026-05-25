@@ -90,6 +90,16 @@ async def _run() -> None:
     )
     await audit_sender.start()
 
+    from .offload import build_oversize_offload
+
+    channel.set_offload_oversize(
+        build_oversize_offload(
+            audit_sender=audit_sender,
+            session_id=session_id,
+            run_id_provider=lambda: current_run_id["value"],
+        )
+    )
+
     mcp_endpoints = hydration.get("mcp_endpoints") or []
     mcp_clients = build_mcp_clients(mcp_endpoints)
 
@@ -218,6 +228,16 @@ async def _run_one_turn(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    # Synchronous startup-delay knob used by the cold-start regression
+    # test to simulate a slow MCP-init handshake. No-op when unset.
+    delay = os.environ.get("INJECT_RUNNER_INIT_DELAY_S")
+    if delay:
+        import time as _time
+
+        try:
+            _time.sleep(int(delay))
+        except ValueError:
+            pass
     # No explicit StrandsTelemetry setup here: the Dockerfile ENTRYPOINT
     # wraps this process with `opentelemetry-instrument`, which installs the
     # OTel SDK tracer/meter provider from OTEL_* env vars. An explicit

@@ -3,7 +3,7 @@
 ORM tables: sessions, messages, audit_log, artifact_metadata.
 Pydantic models: HydrationPayload, McpStdioEndpoint, McpHttpEndpoint.
 
-`AuditEventType` is the single-source-of-truth Literal of the 12 locked
+`AuditEventType` is the single-source-of-truth Literal of the 14 locked
 audit event names.
 """
 from __future__ import annotations
@@ -49,6 +49,18 @@ AuditEventType = Literal[
     "runner_warm_idle_evicted",
     "runner_heartbeat_lost",
     "artifact_registered",
+    # Emitted when the JSONL ingress drops an inbound runner frame
+    # because it exceeded the byte cap (oversized) or the backend
+    # deterministically rejected it (e.g. invalid JSON). Payload shape:
+    # {runner_id, run_id, cause: "frame_oversized" | "frame_rejected",
+    #  upstream_status: int, byte_size: int}.
+    "runner_channel_frame_rejected",
+    # One row per AGENT.md file the runner could not load: malformed
+    # frontmatter, duplicate `name`, or a `name` that collides with an
+    # MCP tool advertised at runner startup. Payload shape:
+    # {file: str, reason: "invalid_spec" | "duplicate_name"
+    #  | "name_conflicts_with_mcp_tool", detail: str}.
+    "runner_subagent_load_failed",
 ]
 
 
@@ -324,6 +336,12 @@ class HydrationPayload(BaseModel):
 
     # Skills
     skills_dir: str = "/skills"
+
+    # Subagents — `/agents` is the parallel runner-side surface to
+    # `/skills`. The backend seeds the `kloc-agents` named volume from
+    # the repo-root `./agents/` tree; the runner reads `<name>/AGENT.md`
+    # via `runner/agents_loader.py` at agent build time.
+    agents_dir: str = "/agents"
 
     # Channel
     backend_url: str

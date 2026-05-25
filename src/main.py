@@ -91,6 +91,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # one row, so RunnerRegistry / WarmIdleManager / HeartbeatWatcher can
     # write audit rows without sharing the request-scoped session.
     audit_emit = make_audit_emit_closure(get_sessionmaker())
+    # Same closure on `app.state` so route handlers (e.g. the JSONL
+    # ingress in `src/api/internal.py`) can emit audit rows without
+    # going through the registry.
+    app.state.audit_emit = audit_emit
     runner_registry = RunnerRegistry(
         warm_idle_s=settings.runner_warm_idle_s,
         heartbeat_timeout_s=settings.runner_heartbeat_timeout_s,
@@ -108,6 +112,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         network=settings.kloc_docker_network,
         backend_url=settings.backend_url,
         skills_host_dir=settings.kloc_skills_dir_host,
+        agents_host_dir=settings.kloc_agents_dir_host,
         event_bus=event_bus,
     )
     runner_registry.set_runner(docker_runner)

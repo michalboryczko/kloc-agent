@@ -54,12 +54,11 @@ def test_models_literal_matches_models_frozenset():
     )
 
 
-def test_locked_vocabulary_has_exactly_twelve_names():
-    """The plan §Audit event vocabulary table has 12 rows. If we ever add
-    or remove an event type, this test forces an explicit decision (and
-    a corresponding plan update)."""
-    assert len(MODELS_AUDIT_EVENT_TYPES) == 12, (
-        f"expected 12 locked audit event names, got "
+def test_locked_vocabulary_has_exactly_fourteen_names():
+    """Locked vocabulary is enumerated. If we ever add or remove an
+    event type, this test forces an explicit decision."""
+    assert len(MODELS_AUDIT_EVENT_TYPES) == 14, (
+        f"expected 14 locked audit event names, got "
         f"{len(MODELS_AUDIT_EVENT_TYPES)}: {sorted(MODELS_AUDIT_EVENT_TYPES)}"
     )
 

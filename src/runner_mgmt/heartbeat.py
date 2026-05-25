@@ -3,6 +3,12 @@
 Per-session task that fires after `RUNNER_HEARTBEAT_TIMEOUT_S` of silence:
 terminate the container, mark the session crashed, and write a
 `runner_heartbeat_lost` audit row.
+
+The watcher is reset by any of `heartbeat` / `RunnerHeartbeat` /
+`runner_ready` frames arriving on the JSONL ingress. `runner_ready` is
+the runner's first emitted frame and counts as the cold-start beat, so a
+slow MCP-init handshake cannot expire the budget before the runner's
+periodic heartbeat loop produces its first explicit beat.
 """
 
 from __future__ import annotations

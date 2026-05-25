@@ -377,10 +377,17 @@
                  backpressure="buffer"
                  carries="ifc.ingest-runner-events">
     <note>Single long-lived chunked POST whose body is a JSONL stream
-    of AG-UI events and runner liveness heartbeats. Reconnect-on-
-    failure with backoff (0.5..10 s) replays the in-flight attempt
-    transcript on the next attempt — over-delivery preferred to silent
-    loss of terminal frames.</note>
+    of AG-UI events and runner liveness heartbeats. Per-line cap is
+    16 MiB (`MAX_LINE_BYTES` in `src/shared/transport_limits.py`); the
+    runner enforces a 15 MiB cap (`RUNNER_MAX_FRAME_BYTES`) on the
+    egress side and routes oversized payloads through the
+    artifact-upload path so the backend never receives an inline body
+    larger than 16 MiB. Reconnect-on-transient-failure with backoff
+    (0.5..10 s) replays the in-flight attempt transcript on the next
+    attempt — over-delivery preferred to silent loss of terminal
+    frames. Permanently-rejected frames (4xx in
+    `PERMANENT_REJECT_STATUSES`) are dropped and surfaced as a single
+    synthetic `RUN_ERROR` event so the channel cannot poison itself.</note>
   </communication>
 
   <!-- Runner -> Postgres (PGMQ inbox consumer: LISTEN + read + ack) -->
@@ -436,6 +443,25 @@
     endpoint; each tool call from the LLM round-trips here. Contract
     is owned by the external party; not documented in
     interfaces.xml.</note>
+  </communication>
+
+  <!-- Backend -> kloc-intelligence file-stat (non-MCP HTTP path) -->
+
+  <communication id="top.com.backend-to-intel-stat"
+                 from="top.backend"
+                 to="top.kloc-intelligence-mcp"
+                 via="http"
+                 mode="sync-request-response"
+                 consistency="eventual"
+                 delivery="at-most-once"
+                 carries="ifc.intel-stat">
+    <note>Best-effort file-stat call from the backend's BeforeToolCall
+    policy layer. 500 ms single-attempt timeout; any failure returns
+    `allow` and increments `kloc_agent.policy.stat_unavailable_total`.
+    Uses a non-MCP HTTP path on the kloc-intelligence container; the
+    real endpoint lands as a sibling change in the kloc-intelligence
+    repo, and `tests/fixtures/intel_stat_server.py` is the canonical
+    contract until that lands.</note>
   </communication>
 
   <!-- Runner -> LLM provider -->

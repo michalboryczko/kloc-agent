@@ -24,6 +24,7 @@ except ImportError:
     aiodocker = None  # type: ignore
 
 from .hydrate import (
+    build_agents_mount,
     build_hydration_mount,
     build_skills_mount,
     cleanup_hydration_tempfile,
@@ -58,6 +59,7 @@ class DockerRunner(Runner):
         network: str,
         backend_url: str,
         skills_host_dir: str,
+        agents_host_dir: str = "./agents",
         memory_bytes: int = 1 * 1024 * 1024 * 1024,
         nano_cpus: int = 2 * 1_000_000_000,
         pids_limit: int = 256,
@@ -73,6 +75,7 @@ class DockerRunner(Runner):
         self._network = network
         self._backend_url = backend_url
         self._skills_host_dir = skills_host_dir
+        self._agents_host_dir = agents_host_dir
         self._memory_bytes = memory_bytes
         self._nano_cpus = nano_cpus
         self._pids_limit = pids_limit
@@ -141,6 +144,7 @@ class DockerRunner(Runner):
                 "Mounts": [
                     build_hydration_mount(),
                     build_skills_mount(self._skills_host_dir),
+                    build_agents_mount(),
                 ],
                 # Resolve `host.docker.internal` to the host gateway so
                 # the runner can reach the operator-managed

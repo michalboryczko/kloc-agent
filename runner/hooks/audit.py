@@ -153,11 +153,19 @@ class AuditHookSender:
             return
         if response.get("decision") == "deny":
             reason = response.get("reason", "policy_denied")
+            hint = response.get("hint")
             event.cancel_tool = reason
-            await self._emit_tool_call_denied(tool_call_id, tool_name, reason)
+            await self._emit_tool_call_denied(
+                tool_call_id, tool_name, reason, hint=hint
+            )
 
     async def _emit_tool_call_denied(
-        self, tool_call_id: Any, tool_name: str, reason: str
+        self,
+        tool_call_id: Any,
+        tool_name: str,
+        reason: str,
+        *,
+        hint: str | None = None,
     ) -> None:
         if not tool_call_id:
             return
@@ -165,15 +173,18 @@ class AuditHookSender:
         if key in self._denied_emitted:
             return
         self._denied_emitted.add(key)
+        value: dict[str, Any] = {
+            "toolCallId": key,
+            "toolName": tool_name,
+            "reason": reason,
+        }
+        if hint:
+            value["hint"] = hint
         await self._emit_custom_event(
             {
                 "type": "CUSTOM",
                 "name": "ToolCallDenied",
-                "value": {
-                    "toolCallId": key,
-                    "toolName": tool_name,
-                    "reason": reason,
-                },
+                "value": value,
             }
         )
 

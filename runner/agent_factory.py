@@ -2,7 +2,8 @@
 
 Composition:
   * model = provider-specific model via `model_factory.create_model`.
-  * tools = MCP tools (kloc-intelligence) + the summarizer sub-agent +
+  * tools = MCP tools (kloc-intelligence) + subagents discovered from
+    `agents/<name>/AGENT.md` via `runner/agents_loader.py` +
     `file_read` for skill-body progressive disclosure.
   * skills_prompt = `discover_skills` + `generate_skills_prompt`.
   * No `session_manager` passed — Postgres is the source of truth.
@@ -26,6 +27,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .agents_loader import build_subagents, discover_agents
 from .hooks.audit import AuditHookSender
 from .model_factory import create_model
 
@@ -60,6 +62,50 @@ class _AuditHookProvider:
         registry.add_callback(
             AfterToolCallEvent, self._audit_sender.after_tool_call
         )
+
+
+def _make_subagent_load_audit_emit(
+    audit_sender: AuditHookSender,
+) -> Any:
+    """Return an async callable the subagent loader uses to report a
+    failed AGENT.md load. The callable wraps the audit sender's HMAC
+    webhook POST so the backend records one `runner_subagent_load_failed`
+    audit row per skipped file."""
+
+    async def _emit(payload: dict) -> None:
+        wrapped = audit_sender._build_payload(
+            event_name="RunnerSubagentLoadFailed", payload=payload
+        )
+        try:
+            await audit_sender._post(wrapped, "RunnerSubagentLoadFailed")
+        except Exception:
+            log.exception("agents.subagent_load_failed_audit_post_failed")
+
+    return _emit
+
+
+def _observe_subagents_loaded_gauge(count: int) -> None:
+    """Best-effort emit of the `kloc_agent.runner.subagents_loaded`
+    gauge. Skipped silently if OTel is not wired in this runtime
+    (unit-test / non-instrumented invocations)."""
+    try:
+        from opentelemetry import metrics  # type: ignore
+    except ImportError:
+        return
+    try:
+        meter = metrics.get_meter(__name__)
+        gauge = meter.create_observable_gauge(
+            name="kloc_agent.runner.subagents_loaded",
+            callbacks=[
+                lambda _opts, _c=count: [metrics.Observation(_c)]  # type: ignore[attr-defined]
+            ],
+            description="Number of subagents successfully loaded at runner startup.",
+        )
+        # Reference the gauge so the SDK keeps it alive until the
+        # process exits; the callback is what the collector reads.
+        del gauge
+    except Exception:
+        log.debug("agents.subagents_loaded_gauge_not_wired")
 
 
 def _load_skills_prompt(skills_dir: Path) -> str:
@@ -123,6 +169,7 @@ def build_agent(
     llm_provider = _field("llm_provider")
     base_prompt = _field("system_prompt", "") or ""
     skills_dir = Path(_field("skills_dir", "/skills") or "/skills")
+    agents_dir = Path(_field("agents_dir", "/agents") or "/agents")
 
     model = create_model(model_id=model_id, llm_provider=llm_provider)
     skills_prompt = _load_skills_prompt(skills_dir)
@@ -130,16 +177,24 @@ def build_agent(
         f"{base_prompt}\n\n{skills_prompt}" if skills_prompt else base_prompt
     )
 
-    summarizer = Agent(
+    mcp_tool_names = {
+        getattr(t, "tool_name", None) or getattr(t, "name", None)
+        for t in mcp_tools
+    }
+    mcp_tool_names.discard(None)
+    subagent_tools: list[Any] = [*mcp_tools]
+    if file_read is not None:
+        subagent_tools.append(file_read)
+    subagents = build_subagents(
+        discover_agents(agents_dir),
         model=model,
-        name="summarizer",
-        system_prompt=(
-            "You receive raw code-intelligence results and produce a "
-            "3-bullet executive summary. Cite symbol FQNs verbatim."
-        ),
+        tools=subagent_tools,
+        reserved_names=mcp_tool_names,
+        audit_emit=_make_subagent_load_audit_emit(audit_sender),
     )
+    _observe_subagents_loaded_gauge(len(subagents))
 
-    tools: list[Any] = [*mcp_tools, summarizer]
+    tools: list[Any] = [*mcp_tools, *subagents]
     if file_read is not None:
         tools.append(file_read)
 

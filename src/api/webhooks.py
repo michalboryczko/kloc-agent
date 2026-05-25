@@ -161,7 +161,7 @@ async def receive_runner_event(
 
     # Policy decision — PoC allow-all unless KLOC_DENY_TOOLS matches.
     policy = Policy(settings)
-    decision = policy.decide(body)
+    decision = await policy.decide(body)
 
     # Persist audit row + side effects (artifact register) + policy
     # decision in the SAME transaction.

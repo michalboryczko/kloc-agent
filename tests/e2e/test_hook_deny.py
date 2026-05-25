@@ -100,20 +100,20 @@ def deny_tools(monkeypatch):
 
 
 @pytest.mark.unit
-def test_policy_allows_when_no_deny_tools(deny_tools):
+async def test_policy_allows_when_no_deny_tools(deny_tools):
     """Default settings → allow everything (PoC default per investigation.md §6)."""
     deny_tools("")
     p = Policy()
-    decision = p.decide({"event": "BeforeToolCall", "payload": {"tool_name": "kloc_source"}})
+    decision = await p.decide({"event": "BeforeToolCall", "payload": {"tool_name": "kloc_source"}})
     assert decision == {"decision": "allow"}
 
 
 @pytest.mark.unit
-def test_policy_denies_when_tool_in_deny_list(deny_tools):
+async def test_policy_denies_when_tool_in_deny_list(deny_tools):
     """KLOC_DENY_TOOLS=kloc_source,kloc_search → deny kloc_source."""
     deny_tools("kloc_source,kloc_search")
     p = Policy()
-    decision = p.decide(
+    decision = await p.decide(
         {"event": "BeforeToolCall", "payload": {"tool_name": "kloc_source"}}
     )
     assert decision["decision"] == "deny"
@@ -121,12 +121,12 @@ def test_policy_denies_when_tool_in_deny_list(deny_tools):
 
 
 @pytest.mark.unit
-def test_policy_only_intercepts_before_tool_call(deny_tools):
+async def test_policy_only_intercepts_before_tool_call(deny_tools):
     """AfterToolCall, heartbeat, ArtifactRegistered → always allow (audit-only)."""
     deny_tools("kloc_source")
     p = Policy()
     for event in ("AfterToolCall", "RunnerHeartbeat", "ArtifactRegistered"):
-        decision = p.decide(
+        decision = await p.decide(
             {"event": event, "payload": {"tool_name": "kloc_source"}}
         )
         assert decision == {"decision": "allow"}, (
@@ -135,13 +135,14 @@ def test_policy_only_intercepts_before_tool_call(deny_tools):
 
 
 @pytest.mark.unit
-def test_policy_denies_only_listed_tool(deny_tools):
+async def test_policy_denies_only_listed_tool(deny_tools):
     """KLOC_DENY_TOOLS=kloc_source: kloc_other still allowed."""
     deny_tools("kloc_source")
     p = Policy()
-    assert p.decide(
+    decision = await p.decide(
         {"event": "BeforeToolCall", "payload": {"tool_name": "kloc_other"}}
-    ) == {"decision": "allow"}
+    )
+    assert decision == {"decision": "allow"}
 
 
 # ---------------------------------------------------------------------------

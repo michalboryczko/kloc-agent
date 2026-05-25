@@ -80,6 +80,24 @@ services:
     restart: "no"
     networks: [kloc]
 
+  agents-init:
+    # Seeds the `kloc-agents` named volume with the repo-root `./agents/`
+    # tree on first boot. Parallel to `skills-init`; same rationale —
+    # named volume bypasses the bind-from-compose vs aiodocker
+    # path-resolution mismatch.
+    image: alpine:3.20
+    volumes:
+      - ./agents:/source:ro
+      - kloc-agents:/dest
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      cp -R /source/. /dest/;
+      echo 'agents-init done';
+      "
+    restart: "no"
+    networks: [kloc]
+
   backend-migrate:
     build:
       context: .
@@ -111,6 +129,8 @@ services:
       BACKEND_URL: http://backend:8000
       KLOC_HOOK_SECRET: ${KLOC_HOOK_SECRET:-dev-secret-please-rotate}
       KLOC_DENY_TOOLS: ${KLOC_DENY_TOOLS:-}
+      KLOC_TOOL_LIMITS: ${KLOC_TOOL_LIMITS:-}
+      KLOC_INTELLIGENCE_STAT_URL: ${KLOC_INTELLIGENCE_STAT_URL:-}
       OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-kloc-agent}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-console}
@@ -129,6 +149,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - kloc-hydration:/tmp/kloc-hydration
       - kloc-skills:/skills-source:ro
+      - kloc-agents:/agents-source:ro
     networks: [kloc]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=2).status==200 else 1)"]
@@ -146,6 +167,8 @@ services:
       mc-init:
         condition: service_completed_successfully
       skills-init:
+        condition: service_completed_successfully
+      agents-init:
         condition: service_completed_successfully
 
   frontend:
@@ -180,3 +203,5 @@ volumes:
     name: kloc-hydration
   kloc-skills:
     name: kloc-skills
+  kloc-agents:
+    name: kloc-agents

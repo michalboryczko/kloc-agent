@@ -129,7 +129,7 @@
         evicts 5 min after terminal frame.
       - sse.py — `make_response` wraps an async iterator in a
         `StreamingResponse` and uses AG-UI's `EventEncoder`; stamps
-        `id: <seq>` on each line.
+        `id: &lt;seq&gt;` on each line.
       - agui_event_formatter.py — `normalize(event)` coerces Pydantic
         or dict to wire form; `is_run_lifecycle_terminal` for stream
         teardown.
@@ -161,28 +161,33 @@
         Memory 1 GiB, 2 NanoCPUs, pids-limit 256, labelled
         `kloc.role=runner`.
       - registry.py — `RunnerRegistry` with per-session
-        `RegistryEntry{handle, warm_idle, heartbeat, inbox, ...}`,
-        per-session spawn lock, in-flight tool-call tracking.
+        `RegistryEntry{handle, warm_idle, heartbeat,
+        in_flight_tool_calls, ...}`, per-session spawn lock,
+        in-flight tool-call tracking. The PGMQ migration moved the
+        inbox out of the entry so there is no `inbox` field.
       - heartbeat.py — `HeartbeatWatcher` per-Session task; on
         timeout: terminate handle and fire on_crash callback.
       - warm_idle.py — `WarmIdleManager` cancels on user-message and
         evicts after the configured idle window.
       - sweeper.py — `orphan_sweep` at boot: kill any
         `kloc.role=runner` container the registry doesn't know.
-      - hydrate.py — writes per-spawn `<runner_id>.json` into the
+      - hydrate.py — writes per-spawn `&lt;runner_id&gt;.json` into the
         hydration named volume and builds the aiodocker Mount dicts.
     </structure>
     <logic>
       <rule>Spawn under the per-session lock so two concurrent stream calls cannot race two containers onto the same Session.</rule>
-      <rule>Heartbeat reset is driven only by `type: "heartbeat"` / `RunnerHeartbeat` frames on the JSONL ingress; AG-UI events do not reset the watcher.</rule>
+      <rule>Heartbeat reset is driven by `type: "heartbeat"` / `RunnerHeartbeat` / `runner_ready` frames on the JSONL ingress; other AG-UI events do not reset the watcher. `runner_ready` is the runner's first emitted frame and counts as the cold-start beat.</rule>
       <rule>On `RUN_FINISHED` start the warm-idle countdown; on the next user-message cancel it.</rule>
       <rule>Boot orphan-sweep runs ONCE after the registry is wired and the registry is empty — every labelled container found is an orphan to terminate.</rule>
       <rule>The hydration file is written before container `create` and is named with the spawn's `runner_id` so concurrent spawns cannot collide on a shared file name.</rule>
+      <rule>`get_or_spawn`, when reusing an existing entry, calls `warm_idle.on_user_message()` before `await_kill_in_flight()` so the countdown task is cancelled atomically as part of the reuse decision.</rule>
+      <rule>`WarmIdleManager.await_kill_in_flight()` blocks only during the terminate phase; during the countdown phase it returns immediately. Awaiting the countdown task here would self-block for the full warm-idle window.</rule>
     </logic>
     <requires ref="cmp.backend.streaming"/>
     <constraints>
       <constraint ref="con.runner-mgmt-aiodocker-only"/>
       <constraint ref="con.spawn-under-lock"/>
+      <constraint ref="con.warm-idle-cancel-before-reuse"/>
     </constraints>
   </component>
 
@@ -256,8 +261,24 @@
       - verify_hmac.py — `verify_hmac_signature` (HMAC-SHA256 over
         `f"{ts}.{body}"`, base64, 60 s replay window, constant-time
         compare); `sign_for_test` for tests.
-      - policy.py — `Policy.decide` (allow-all unless
-        `event=BeforeToolCall AND tool_name in deny_tools_set`).
+      - policy.py — `Policy.decide` consults the deny-set fallback
+        (`KLOC_DENY_TOOLS`) first, then a per-tool
+        `ToolPolicyEvaluator` from `EVALUATORS` when the event is
+        `BeforeToolCall`. Evaluator denials carry a `hint` field the
+        runner threads into the `ToolCallDenied` AG-UI event.
+      - stat_client.py — best-effort `stat(path)` against the
+        kloc-intelligence `/v1/file_stat` endpoint; 500 ms single
+        attempt; `None` on any failure (allow).
+      - evaluators/__init__.py — `EVALUATORS` registry +
+        `ToolPolicyEvaluator` Protocol.
+      - evaluators/file_read.py — `FileReadEvaluator`. Denies
+        whole-file reads larger than
+        `KLOC_TOOL_LIMITS.file_read.max_bytes`; a byte-range read
+        (`start_line`/`end_line`/`max_bytes`) bypasses the stat
+        call.
+      - evaluators/kloc_flows.py — `KlocFlowsEvaluator`. Denies
+        unbounded `kloc_flows()` calls when
+        `require_bounded=true`.
       - emit.py — `make_audit_emit_closure(sessionmaker)` returns an
         async `emit(event_type, payload)` that opens a fresh
         AsyncSession, writes one audit row, commits.
@@ -267,6 +288,8 @@
     <constraints>
       <constraint ref="con.hmac-constant-time"/>
       <constraint ref="con.audit-emit-fresh-session"/>
+      <constraint ref="con.tool-policy-argument-aware"/>
+      <constraint ref="con.policy-stat-best-effort"/>
     </constraints>
   </component>
 
@@ -352,7 +375,7 @@
         `Promise.all([getSession, listMessages(limit=500)])`; on
         ApiError 404 → notFound().
       - s/[sessionId]/ConversationClient.tsx — `"use client"`
-        boundary that renders `<Conversation>` with the SSR-hydrated
+        boundary that renders `&lt;Conversation&gt;` with the SSR-hydrated
         props.
     </structure>
     <logic>
@@ -375,7 +398,7 @@
       - route.ts — `POST /api/agent-proxy` forwards to `POST
         /v1/sessions/{thread_id}/stream`.
       - resume/route.ts — `GET /api/agent-proxy/resume` forwards to
-        `GET /v1/sessions/{session_id}/stream?run_id=&last_event_id=`.
+        `GET /v1/sessions/{session_id}/stream?run_id=&amp;last_event_id=`.
       Both set `runtime = "nodejs"` and
       `dynamic = "force-dynamic"` so Next.js does not try to cache
       or pre-render them.
@@ -472,10 +495,11 @@
         first-turn-only merge of `prior_messages` with the inbound
         list to avoid duplication.
       - agent_factory.py — `build_agent` (Strands `Agent` with MCP
-        tools + a `summarizer` sub-Agent + optional `file_read`),
-        `_AuditHookProvider` that registers BeforeToolCallEvent /
-        AfterToolCallEvent callbacks on the per-thread inner agent
-        the AG-UI wrapper constructs.
+        tools + a set of subagents auto-discovered from
+        `agents/&lt;name&gt;/AGENT.md` via `cmp.runner.agents-loader` +
+        optional `file_read`), `_AuditHookProvider` that registers
+        BeforeToolCallEvent / AfterToolCallEvent callbacks on the
+        per-thread inner agent the AG-UI wrapper constructs.
       - model_factory.py — provider switch on
         `payload.llm_provider` (anthropic / gemini wired,
         openrouter / bedrock raise NotImplementedError).
@@ -492,9 +516,59 @@
     </logic>
     <requires ref="cmp.runner.channel"/>
     <requires ref="cmp.runner.hooks"/>
+    <requires ref="cmp.runner.agents-loader"/>
     <constraints>
       <constraint ref="con.runner-mcp-scope-wraps-loop"/>
       <constraint ref="con.runner-first-turn-merge"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.runner.agents-loader"
+             zone="runner/agents_loader.py"
+             in-unit="top.runner">
+    <intent>Filesystem autoregistry that turns each `agents/&lt;name&gt;/AGENT.md`
+    file on the runner-side `/agents` named-volume mount into a Strands
+    `Agent` the orchestrator exposes as a tool (agents-as-tools). Replaces
+    the formerly hardcoded sub-agent that the runner built at boot.
+    Failure modes are quiet skips per file, never fatal: a single
+    malformed pack must not take down the runner for every other session
+    pointing at the same `/agents` volume.</intent>
+    <structure>
+      - `AgentSpec(BaseModel)` — frontmatter contract: `name`
+        (`^[a-z][a-z0-9-]*$`, 1-64 chars), `description` (1-1024 chars),
+        `system_prompt` (the markdown body, author-owned, no template
+        prefix), `path`.
+      - `discover_agents(agents_dir: Path) -> list[AgentSpec]` — walks
+        `agents_dir/*/AGENT.md`, parses YAML frontmatter + body, returns
+        the spec list sorted by `name`. Returns `[]` on a missing or
+        non-directory path.
+      - `build_subagents(specs, model, tools, reserved_names,
+        audit_emit)` — for each spec, instantiates `Agent(model=...,
+        name=spec.name, system_prompt=spec.system_prompt, tools=...)`.
+        Skips specs whose `name` is in `reserved_names` (the MCP tool
+        name set) and routes a `runner_subagent_load_failed` audit row
+        via `audit_emit`.
+    </structure>
+    <logic>
+      <rule>`name` is unique across the directory; on duplicate, the
+      first-by-sort wins and the second is skipped with a
+      `agents.duplicate_name` warning.</rule>
+      <rule>On a `name` collision with an MCP tool, the subagent is
+      skipped (MCP tool wins because renaming an MCP tool is not
+      recoverable) AND a `runner_subagent_load_failed` audit row is
+      emitted via `audit_emit`.</rule>
+      <rule>Malformed YAML / missing-required-field / invalid-`name`-regex
+      is a quiet skip with a `agents.invalid_spec` warning; siblings
+      keep loading.</rule>
+      <rule>Each constructed subagent receives the same toolset as the
+      orchestrator: `[*mcp_tools, file_read]`. Per-subagent tool
+      filtering is out of scope and tracked as an open item.</rule>
+      <rule>Each subagent inherits the orchestrator's `Model` instance.
+      Per-subagent model override is out of scope and tracked as an
+      open item.</rule>
+    </logic>
+    <constraints>
+      <constraint ref="con.subagent-name-unique-and-disjoint-from-mcp"/>
     </constraints>
   </component>
 
@@ -510,17 +584,24 @@
       `BackendChannel` class with three async loops:
       `_stream_outbound` (single chunked POST whose body is a
       long-lived generator), `iter_inbound` (25 s GET long-poll),
-      `_heartbeat_loop` (15 s `set_busy`-aware ping). Outbound queue
-      bounded at 1024 with a sentinel for clean shutdown.
+      `_heartbeat_loop` (15 s `set_busy`-aware ping). The heartbeat
+      loop emits the first beat at t≈0 — before the leading
+      `asyncio.sleep` — so a slow MCP-init does not outrun the
+      backend's heartbeat watcher. Outbound queue bounded at 1024
+      with a sentinel for clean shutdown.
     </structure>
     <logic>
-      <rule>Over-delivery is preferred to silent loss — on any transport failure prepend the whole attempt's frames to the cross-attempt buffer before draining the queue, so the next attempt's body iterator replays them in order.</rule>
+      <rule>On a transient transport failure (httpx.TransportError, response status 408, 5xx) prepend the whole attempt's frames to the cross-attempt buffer before draining the queue, so the next attempt's body iterator replays them in order — over-delivery is preferred to silent loss.</rule>
+      <rule>On a permanent rejection (response status in `PERMANENT_REJECT_STATUSES = {400, 413, 414, 415, 422}`) drop the offending frame, emit a single synthetic `RUN_ERROR` with `cause="frame_rejected"` and the upstream status, and continue draining; replaying a deterministically rejected frame loops forever.</rule>
+      <rule>The runner refuses to enqueue any JSONL line larger than `RUNNER_MAX_FRAME_BYTES`; oversized payloads are routed through the artifact-upload path and the AG-UI frame is rewritten to reference the returned `artifact_id`.</rule>
       <rule>The inbox loop swallows `httpx.TimeoutException` and re-polls; other exceptions back off 1 s and continue, never propagate to the entrypoint.</rule>
       <rule>The `shutdown` inbox frame ends `iter_inbound`; the entrypoint then exits the inbox loop and stops the channel cleanly.</rule>
     </logic>
     <constraints>
-      <constraint ref="con.channel-replay-on-failure"/>
+      <constraint ref="con.channel-replay-on-transient"/>
+      <constraint ref="con.channel-drop-on-permanent"/>
       <constraint ref="con.channel-no-direct-llm-call"/>
+      <constraint ref="con.first-beat-on-channel-start"/>
     </constraints>
   </component>
 
@@ -682,6 +763,21 @@
     <forbid construct="audit-emit-sharing-request-session"/>
   </constraint>
 
+  <constraint id="con.tool-policy-argument-aware" type="pattern">
+    <intent>`Policy.decide` consults a per-tool `ToolPolicyEvaluator`
+    registry when `event_type == BeforeToolCall`; the evaluator
+    inspects `args` and may deny with a reason and a hint.</intent>
+    <require>Per-tool evaluators are looked up in `EVALUATORS` by `tool_name`.</require>
+    <require>An evaluator deny response carries `reason` namespaced under `tool_limit:*` and an optional `hint` string.</require>
+  </constraint>
+
+  <constraint id="con.policy-stat-best-effort" type="rule">
+    <intent>Stat-call failure returns `allow`; the cap is guidance,
+    not a security boundary.</intent>
+    <require>`stat_client.stat` returns `None` on any failure and the evaluator returns `None` (allow) when the stat is unavailable.</require>
+    <forbid construct="policy-stat-call-blocking-on-error"/>
+  </constraint>
+
   <!-- storage -->
 
   <constraint id="con.storage-no-orm" type="rule">
@@ -775,13 +871,42 @@
     <forbid construct="prior-messages-merged-on-every-turn"/>
   </constraint>
 
-  <constraint id="con.channel-replay-on-failure" type="pattern">
-    <intent>On any outbound transport failure, the channel prepends
-    every frame yielded during the broken attempt back into the
-    pending buffer BEFORE draining the queue, so the next attempt's
-    body iterator replays them in original order.</intent>
-    <require>`yielded_this_attempt` is prepended to `pending_after_break` on every reconnect path.</require>
-    <forbid construct="silent-drop-on-transport-failure"/>
+  <constraint id="con.channel-replay-on-transient" type="pattern">
+    <intent>On a transient outbound failure (httpx.TransportError or
+    response status 408 or 5xx) the channel prepends every frame
+    yielded during the broken attempt back into the pending buffer
+    BEFORE draining the queue, so the next attempt's body iterator
+    replays them in original order. Over-delivery is preferred to
+    silent loss of terminal frames; the AG-UI consumer tolerates
+    duplicate intermediates.</intent>
+    <require>`yielded_this_attempt` is prepended to `pending_after_break` on the transient-failure branch.</require>
+    <forbid construct="silent-drop-on-transient-failure"/>
+  </constraint>
+
+  <constraint id="con.channel-drop-on-permanent" type="pattern">
+    <intent>On a permanent rejection (response status in
+    `PERMANENT_REJECT_STATUSES = {400, 413, 414, 415, 422}`) the
+    channel drops the offending frame, emits a single synthetic
+    `RUN_ERROR` AG-UI event carrying `cause="frame_rejected"` and the
+    upstream status, and continues draining the queue. Replaying a
+    deterministically-rejected frame loops forever and starves the
+    persister.</intent>
+    <require>`PERMANENT_REJECT_STATUSES` is a single named `frozenset[int]` at module scope in `runner/channel.py`.</require>
+    <require>The offending frame is removed from the replay buffer before the next attempt.</require>
+    <forbid construct="prepend-permanent-reject-frame-to-pending"/>
+  </constraint>
+
+  <constraint id="con.warm-idle-cancel-before-reuse" type="rule">
+    <intent>When `RunnerRegistry.get_or_spawn` finds a warm
+    `RegistryEntry`, it calls `entry.warm_idle.on_user_message()`
+    BEFORE `entry.warm_idle.await_kill_in_flight()`. Inverting that
+    order causes the handler to self-block for the entire warm-idle
+    window because the countdown task only completes when the
+    activity event is set, which the caller cannot do until
+    `get_or_spawn` returns.</intent>
+    <require>`on_user_message()` precedes `await_kill_in_flight()` on the warm-entry-found branch.</require>
+    <require>`WarmIdleManager.await_kill_in_flight()` is a no-op while `_killing is False`.</require>
+    <forbid construct="await-warm-idle-countdown-task-during-reuse"/>
   </constraint>
 
   <constraint id="con.channel-no-direct-llm-call" type="rule">
@@ -789,6 +914,27 @@
     SDKs or call them — its only counterparty is `top.backend`.</intent>
     <forbid construct="channel-importing-anthropic-sdk"/>
     <forbid construct="channel-importing-gemini-sdk"/>
+  </constraint>
+
+  <constraint id="con.first-beat-on-channel-start" type="rule">
+    <intent>The runner's `_heartbeat_loop` emits the first
+    `type: heartbeat` frame BEFORE the first
+    `asyncio.sleep(HEARTBEAT_INTERVAL_S)`. The `runner_ready` frame is
+    the de-facto first beat at the ingress level; the explicit
+    `heartbeat` frame follows promptly.</intent>
+    <require>`_heartbeat_loop` performs its first `emit` before the leading sleep.</require>
+    <forbid construct="heartbeat-loop-leading-sleep-before-first-emit"/>
+  </constraint>
+
+  <constraint id="con.subagent-name-unique-and-disjoint-from-mcp" type="rule">
+    <intent>Subagent `name` (from `AGENT.md` frontmatter) must be
+    unique across `agents/&lt;*&gt;/AGENT.md` and must not collide with any
+    MCP tool name advertised at runner startup. Collisions are skipped
+    with a `runner_subagent_load_failed` audit row; load does not
+    abort.</intent>
+    <require>`build_subagents` consults a `reserved_names: set[str]` of MCP tool names and skips any spec whose `name` is in the set.</require>
+    <require>On a duplicate `name` across two AGENT.md files the first by sort order wins; the second is skipped with a `agents.duplicate_name` warning.</require>
+    <forbid construct="subagent-load-error-fatal-to-runner-startup"/>
   </constraint>
 
   <constraint id="con.hook-deadline-bounded" type="rule">
@@ -865,8 +1011,10 @@
 
   <!-- Public SSE: the heart of beh.ask-assistant.
        The flow visits api (POST handler) → streaming (EventBus
-       register-before-publish) → runner-mgmt (get_or_spawn,
-       inbox.put) → streaming (persister + SSE generator) → repos
+       register-before-publish) → runner-mgmt (get_or_spawn —
+       cancel-before-reuse: on_user_message() then
+       await_kill_in_flight() inside get_or_spawn, then PGMQ send
+       to inbox) → streaming (persister + SSE generator) → repos
        (assistant-row append + finalize). -->
 
   <call-flow id="com.flow.open-run-stream"
