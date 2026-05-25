@@ -522,6 +522,49 @@
        `<element>` rather than a `<contract>`.
        =========================== -->
 
+  <!-- ============================================================
+       Contract: read_project_file runner-side Strands tool. Not a
+       wire protocol — an in-process tool signature — but its
+       failure-mode protocol IS a contract the orchestrator observes
+       as the tool result string, so it is documented here.
+       =========================== -->
+
+  <contract id="ifc.read-project-file"
+            provider="top.runner"
+            consumers="top.runner"
+            style="custom"
+            spec-ref="./schemas/read-project-file.signature.md">
+
+    <operation id="ifc.read-project-file-call"
+               contract="ifc.read-project-file"
+               name="read_project_file(project_name, path, start_line=None, end_line=None) -> str"
+               intent="Read a single file from a mounted project source tree at `/projects/{project_name}/{path}`. Optionally returns a 1-indexed inclusive slice when start_line / end_line are supplied. Returns the file body as a UTF-8 string on success or an `error: ...` string on every refusal path (invalid project_name, path escape, unmounted project, non-file, binary, oversize)."
+               mode="sync-request-response"
+               consistency="strong"
+               delivery="at-most-once"
+               idempotency="not-applicable"
+               realizes-behavior="beh.ask-assistant">
+      <failure-mode condition="invalid-project-name"
+                    caller-action="fail-fast"
+                    provider-promise="returns-error-string-no-filesystem-access"/>
+      <failure-mode condition="path-escapes-project-root"
+                    caller-action="fail-fast"
+                    provider-promise="returns-error-string-path-escapes"/>
+      <failure-mode condition="project-not-mounted"
+                    caller-action="fail-fast"
+                    provider-promise="returns-error-string-project-not-mounted"/>
+      <failure-mode condition="not-a-regular-file"
+                    caller-action="fail-fast"
+                    provider-promise="returns-error-string-not-a-regular-file"/>
+      <failure-mode condition="binary-file"
+                    caller-action="fail-fast"
+                    provider-promise="returns-error-string-file-appears-to-be-binary"/>
+      <failure-mode condition="oversize"
+                    caller-action="fail-fast"
+                    provider-promise="denied-by-BeforeToolCall-with-tool_limit:file_too_large-hint"/>
+    </operation>
+  </contract>
+
   <element id="ifc.agents-mount">
     <intent>The runner-side `/agents` mount surfaces the autoregistry of
     Strands subagents. Read-only named volume `kloc-agents`, seeded by

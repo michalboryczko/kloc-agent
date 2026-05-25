@@ -9,10 +9,10 @@ host-side — files written inside the backend container do not exist on
 the host.
 
 The same module also builds the read-only named-volume Mount dicts that
-surface the runner-side `/skills` and `/agents` trees. Both follow the
-same shape: a compose-managed named volume (`kloc-skills`, `kloc-agents`)
-seeded by a one-shot init sidecar from the repo-root `./skills/` and
-`./agents/` directories.
+surface the runner-side `/skills`, `/agents`, and `/projects` trees. Each
+follows the same shape: a compose-managed named volume (`kloc-skills`,
+`kloc-agents`, `kloc-projects`) seeded by a one-shot init sidecar from the
+repo-root `./skills/`, `./agents/`, and `./projects/` directories.
 """
 
 from __future__ import annotations
@@ -146,5 +146,21 @@ def build_agents_mount() -> dict:
         "Type": "volume",
         "Source": os.environ.get("KLOC_AGENTS_VOLUME", "kloc-agents"),
         "Target": "/agents",
+        "ReadOnly": True,
+    }
+
+
+def build_projects_mount() -> dict:
+    """Project sources directory mount via shared named volume
+    `kloc-projects`.
+
+    Parallel to `build_skills_mount` / `build_agents_mount`. The runner
+    reads `/projects/<project_name>/<path>` via the `read_project_file`
+    Strands tool; the volume is seeded from the repo-root `./projects/`
+    tree by the `projects-init` compose sidecar."""
+    return {
+        "Type": "volume",
+        "Source": os.environ.get("KLOC_PROJECTS_VOLUME", "kloc-projects"),
+        "Target": "/projects",
         "ReadOnly": True,
     }

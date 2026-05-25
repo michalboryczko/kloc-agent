@@ -17,6 +17,7 @@ from src.hooks_audit.policy import Policy
 from src.settings import (
     FileReadLimits,
     KlocFlowsLimits,
+    ReadProjectFileLimits,
     Settings,
     ToolLimitsConfig,
 )
@@ -35,12 +36,17 @@ def _settings(
     *,
     file_read: FileReadLimits | None = None,
     kloc_flows: KlocFlowsLimits | None = None,
+    read_project_file: ReadProjectFileLimits | None = None,
     deny_tools: str = "",
 ) -> Settings:
     return Settings(  # type: ignore[call-arg]
         _env_file=None,
         kloc_deny_tools=deny_tools,
-        tool_limits=ToolLimitsConfig(file_read=file_read, kloc_flows=kloc_flows),
+        tool_limits=ToolLimitsConfig(
+            file_read=file_read,
+            kloc_flows=kloc_flows,
+            read_project_file=read_project_file,
+        ),
     )
 
 
@@ -196,5 +202,129 @@ async def test_non_before_tool_call_allows() -> None:
     policy = Policy(_settings(file_read=FileReadLimits(max_bytes=1)))
     decision = await policy.decide(
         {"event": "AfterToolCall", "payload": {"tool_name": "file_read"}}
+    )
+    assert decision == {"decision": "allow"}
+
+
+# ---------------------------------------------------------------------------
+# read_project_file evaluator
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def projects_root(tmp_path, monkeypatch):
+    root = tmp_path / "projects-source"
+    proj = root / "kyc"
+    src = proj / "src"
+    src.mkdir(parents=True)
+    monkeypatch.setenv("KLOC_PROJECTS_BACKEND_DIR", str(root))
+    return root
+
+
+async def test_read_project_file_oversize_denies_with_hint(
+    projects_root,
+) -> None:
+    big = projects_root / "kyc" / "vendor"
+    big.mkdir()
+    big_file = big / "big.json"
+    big_file.write_bytes(b"x" * (5 * 1024 * 1024))
+
+    policy = Policy(
+        _settings(read_project_file=ReadProjectFileLimits(max_bytes=262_144))
+    )
+    decision = await policy.decide(
+        _before(
+            "read_project_file",
+            {"project_name": "kyc", "path": "vendor/big.json"},
+        )
+    )
+    assert decision["decision"] == "deny"
+    assert decision["reason"] == "tool_limit:file_too_large"
+    assert "cap" in decision["hint"]
+    assert "256 KiB" in decision["hint"]
+    assert "start_line" in decision["hint"]
+
+
+async def test_read_project_file_slice_bypasses_cap(projects_root) -> None:
+    big = projects_root / "kyc" / "vendor"
+    big.mkdir()
+    big_file = big / "big.json"
+    big_file.write_bytes(b"x" * (5 * 1024 * 1024))
+
+    policy = Policy(
+        _settings(read_project_file=ReadProjectFileLimits(max_bytes=262_144))
+    )
+    decision = await policy.decide(
+        _before(
+            "read_project_file",
+            {
+                "project_name": "kyc",
+                "path": "vendor/big.json",
+                "start_line": 1,
+                "end_line": 50,
+            },
+        )
+    )
+    assert decision == {"decision": "allow"}
+
+
+async def test_read_project_file_under_cap_allows(projects_root) -> None:
+    small = projects_root / "kyc" / "src" / "A.php"
+    small.write_text("<?php\necho 'hi';\n", encoding="utf-8")
+
+    policy = Policy(
+        _settings(read_project_file=ReadProjectFileLimits(max_bytes=262_144))
+    )
+    decision = await policy.decide(
+        _before(
+            "read_project_file",
+            {"project_name": "kyc", "path": "src/A.php"},
+        )
+    )
+    assert decision == {"decision": "allow"}
+
+
+async def test_read_project_file_invalid_project_name_allows(
+    projects_root,
+) -> None:
+    """An invalid project_name short-circuits to allow on the evaluator
+    side; the runner-side tool surfaces the validation error string
+    independently."""
+    policy = Policy(
+        _settings(read_project_file=ReadProjectFileLimits(max_bytes=1))
+    )
+    decision = await policy.decide(
+        _before(
+            "read_project_file",
+            {"project_name": "..bad..", "path": "anything"},
+        )
+    )
+    assert decision == {"decision": "allow"}
+
+
+async def test_read_project_file_missing_project_allows(projects_root) -> None:
+    policy = Policy(
+        _settings(read_project_file=ReadProjectFileLimits(max_bytes=1))
+    )
+    decision = await policy.decide(
+        _before(
+            "read_project_file",
+            {"project_name": "unknown", "path": "src/x"},
+        )
+    )
+    assert decision == {"decision": "allow"}
+
+
+async def test_read_project_file_no_limit_configured_allows(
+    projects_root,
+) -> None:
+    """When tool_limits.read_project_file is not set, the evaluator
+    has no opinion and the call flows through unconditionally."""
+    policy = Policy(_settings())
+    decision = await policy.decide(
+        _before(
+            "read_project_file",
+            {"project_name": "kyc", "path": "src/A.php"},
+        )
     )
     assert decision == {"decision": "allow"}

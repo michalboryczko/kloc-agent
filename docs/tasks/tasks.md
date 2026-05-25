@@ -41,6 +41,8 @@ in the USDL plugin.
 | T05 | tool-call parent linking: group tool calls under their assistant message in the UI   | passed               | —           |
 | T06 | tool-call history persistence: restore tool calls after refresh                      | passed               | T05         |
 | T07 | markdown rendering: render assistant prose as styled markdown, not raw text          | passed               | —           |
+| T08 | agent-skills: inline skill bodies into system prompt + ship analyst-facing skill set | passed               | —           |
+| T09 | runner-project-files: read-only project source access (`kloc-projects` volume + `read_project_file` tool) | passed  | —           |
 
 ### Predecessor (closed, not numbered)
 

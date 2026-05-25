@@ -103,6 +103,16 @@
     <tech>Docker named volume</tech>
   </unit>
 
+  <unit id="top.projects-volume" kind="object-store" owner="kloc-team">
+    <description>Docker-managed named volume `kloc-projects` seeded
+    from `./projects/` by the `projects-init` compose helper. Mounted
+    `/projects-source` (backend, RO) and `/projects` (each runner, RO).
+    Holds the per-project source trees the runner-side
+    `read_project_file` Strands tool serves to the orchestrator at
+    `/projects/&lt;project_name&gt;/&lt;path&gt;`.</description>
+    <tech>Docker named volume</tech>
+  </unit>
+
   <unit id="top.docker-daemon" kind="external-api"
         internal="false" owner="docker">
     <description>The host's Docker engine. Reached by the backend over
@@ -363,6 +373,38 @@
                  delivery="not-applicable">
     <note>Runner reads SKILL.md files from `/skills` (RO) to build
     its system prompt at startup.</note>
+  </communication>
+
+  <!-- Backend -> Projects volume (seeding view) -->
+
+  <communication id="top.com.backend-to-projects-volume"
+                 from="top.backend"
+                 to="top.projects-volume"
+                 via="file-system"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="not-applicable">
+    <note>Backend mounts `kloc-projects` read-only at
+    `/projects-source` (the active seeding is owned by the
+    `projects-init` helper, not the backend at runtime). The
+    `read_project_file` policy evaluator stats files via this view
+    to enforce the per-tool size cap.</note>
+  </communication>
+
+  <!-- Runner -> Projects volume (read on demand) -->
+
+  <communication id="top.com.runner-from-projects-volume"
+                 from="top.runner"
+                 to="top.projects-volume"
+                 via="file-system"
+                 mode="sync-request-response"
+                 consistency="strong"
+                 delivery="not-applicable">
+    <note>Runner reads files under `/projects/&lt;project_name&gt;/...`
+    on demand via the `read_project_file` Strands tool. Path
+    resolution uses `Path.resolve(strict=True)` plus a string-prefix
+    containment check against the resolved project root so symlinks
+    cannot escape the per-project subtree.</note>
   </communication>
 
   <!-- Runner -> Backend (chunked AG-UI event stream) -->

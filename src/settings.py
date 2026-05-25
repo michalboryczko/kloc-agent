@@ -31,11 +31,18 @@ class KlocFlowsLimits(BaseModel):
     max_results: int | None = None
 
 
+class ReadProjectFileLimits(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    max_bytes: int | None = 262_144
+
+
 class ToolLimitsConfig(BaseModel):
     model_config = {"extra": "forbid"}
 
     file_read: FileReadLimits | None = None
     kloc_flows: KlocFlowsLimits | None = None
+    read_project_file: ReadProjectFileLimits | None = None
     # Stored-data cap for the `tool_calls.result` column. Live SSE
     # delivery is untouched — this only governs persistence, mirroring
     # the runner-side oversize-offload marker semantics.

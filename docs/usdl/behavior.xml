@@ -261,6 +261,8 @@
       <rule ref="beh.rule.artifact-surfaced"/>
       <rule ref="beh.rule.single-analyst-ownership"/>
       <rule ref="rul.tool-call-parent-id"/>
+      <rule ref="rul.skills-already-loaded"/>
+      <rule ref="rul.read-project-file-on-named-project"/>
     </rules>
     <invariants>
       <invariant ref="inv.message-sequence-monotonic"/>
@@ -366,6 +368,14 @@
 
   <rule id="rul.tool-call-parent-id" pattern="event-driven">
     Every TOOL_CALL_START AG-UI event (and every CUSTOM { name: ToolCallDenied } event) emitted during an Assistant turn shall carry a parentMessageId equal to the messageId of the most-recent TEXT_MESSAGE_START within that run. Tool calls that arrive without parentMessageId shall be dropped by the frontend reducer with a console warning; the runner is the source of truth.
+  </rule>
+
+  <rule id="rul.skills-already-loaded" pattern="ubiquitous">
+    Skill bodies under `&lt;available_skills&gt;` in the system prompt are loaded in full. The orchestrator MUST NOT issue a `file_read` whose target is a `SKILL.md` file already inlined in the prompt; doing so wastes a turn and re-fetches content the model already has.
+  </rule>
+
+  <rule id="rul.read-project-file-on-named-project" pattern="event-driven">
+    When the Analyst names a project (`kyc`, `order-api`, …) AND references a file path, the orchestrator MUST call `read_project_file(project_name=..., path=...)` to fetch byte-exact content before quoting it. `kloc_source` / `kloc_chunks` remain preferred for chunked indexed PHP; `read_project_file` is the tool for byte-exact ranges, non-PHP files, and files outside the index.
   </rule>
 
   <rule id="beh.rule.single-analyst-ownership" pattern="ubiquitous">

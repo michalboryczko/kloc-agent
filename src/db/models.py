@@ -397,6 +397,13 @@ class HydrationPayload(BaseModel):
     # via `runner/agents_loader.py` at agent build time.
     agents_dir: str = "/agents"
 
+    # Project sources — `/projects` is the runner-side surface for the
+    # `read_project_file` tool. Backend seeds the `kloc-projects` named
+    # volume from the repo-root `./projects/` tree; the runner reads
+    # `<project_name>/<path>` on demand. Override seam for the runner-
+    # side tool resolver.
+    projects_dir: str = "/projects"
+
     # Channel
     backend_url: str
     heartbeat_interval_s: int = 15

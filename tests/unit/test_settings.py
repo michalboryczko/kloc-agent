@@ -336,3 +336,49 @@ def test_diag_events_can_be_enabled_via_env(monkeypatch, tmp_path) -> None:
 
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.diag_events is True
+
+
+# ---------------------------------------------------------------------------
+# read_project_file tool-limit parse
+# ---------------------------------------------------------------------------
+
+
+def test_tool_limits_parses_read_project_file_from_env(
+    monkeypatch, tmp_path
+) -> None:
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.setenv(
+        "KLOC_TOOL_LIMITS",
+        '{"read_project_file":{"max_bytes":1024}}',
+    )
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.tool_limits.read_project_file is not None
+    assert s.tool_limits.read_project_file.max_bytes == 1024
+
+
+def test_read_project_file_limits_defaults_to_256_kib(
+    monkeypatch, tmp_path
+) -> None:
+    from src.settings import ReadProjectFileLimits
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.chdir(tmp_path)
+    cfg = ReadProjectFileLimits()
+    assert cfg.max_bytes == 262_144
+
+
+def test_tool_limits_read_project_file_unset_is_none(
+    monkeypatch, tmp_path
+) -> None:
+    from src.settings import Settings
+
+    monkeypatch.setenv("KLOC_STUB_MODE", "true")
+    monkeypatch.delenv("KLOC_TOOL_LIMITS", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.tool_limits.read_project_file is None

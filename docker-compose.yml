@@ -98,6 +98,24 @@ services:
     restart: "no"
     networks: [kloc]
 
+  projects-init:
+    # Seeds the `kloc-projects` named volume with the repo-root
+    # `./projects/` tree on first boot. Parallel to `skills-init` /
+    # `agents-init`; the `read_project_file` runner-side tool serves
+    # files from this volume mounted at `/projects` (RO) on each runner.
+    image: alpine:3.20
+    volumes:
+      - ./projects:/source:ro
+      - kloc-projects:/dest
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      cp -R /source/. /dest/;
+      echo 'projects-init done';
+      "
+    restart: "no"
+    networks: [kloc]
+
   backend-migrate:
     build:
       context: .
@@ -150,6 +168,7 @@ services:
       - kloc-hydration:/tmp/kloc-hydration
       - kloc-skills:/skills-source:ro
       - kloc-agents:/agents-source:ro
+      - kloc-projects:/projects-source:ro
     networks: [kloc]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=2).status==200 else 1)"]
@@ -169,6 +188,8 @@ services:
       skills-init:
         condition: service_completed_successfully
       agents-init:
+        condition: service_completed_successfully
+      projects-init:
         condition: service_completed_successfully
 
   frontend:
@@ -205,3 +226,5 @@ volumes:
     name: kloc-skills
   kloc-agents:
     name: kloc-agents
+  kloc-projects:
+    name: kloc-projects

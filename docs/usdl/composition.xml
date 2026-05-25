@@ -599,6 +599,7 @@
       <rule>On the FIRST turn merge `prior_messages` with the inbound `messages`; on subsequent turns use the inbound list as-is (the backend already pushes the cumulative list).</rule>
       <rule>On an exception inside `agui_agent.run` emit a synthetic `RUN_ERROR` frame with `cause: "runner_crashed"` so the backend's SSE consumers close cleanly and the warm-idle watcher fires.</rule>
       <rule>The audit hooks must be registered via `StrandsAgent(hooks=[provider])` (not on the seed `Agent`) — the wrapper builds a fresh per-thread inner agent that does not inherit seed-agent hooks.</rule>
+      <rule>`strands_agentskills` is imported ONLY for its `discover_skills` discoverer (YAML-frontmatter validation + silent drop-with-warning of broken files). The `AgentSkills` plugin is NOT registered on the `Agent`; instead, `_load_skills_prompt` reads every discovered SKILL.md body off disk, strips the leading frontmatter block, and inlines it into the system prompt under `&lt;available_skills&gt;` so the orchestrator sees the procedures before its first MCP call.</rule>
     </logic>
     <requires ref="cmp.runner.channel"/>
     <requires ref="cmp.runner.hooks"/>
@@ -606,6 +607,7 @@
     <constraints>
       <constraint ref="con.runner-mcp-scope-wraps-loop"/>
       <constraint ref="con.runner-first-turn-merge"/>
+      <constraint ref="con.skills-bodies-inlined"/>
     </constraints>
   </component>
 
@@ -655,6 +657,43 @@
     </logic>
     <constraints>
       <constraint ref="con.subagent-name-unique-and-disjoint-from-mcp"/>
+    </constraints>
+  </component>
+
+  <component id="cmp.runner.read-project-file-tool"
+             zone="runner/tools/project_files.py"
+             in-unit="top.runner">
+    <intent>Strands `@tool` implementation that reads a single file
+    from the runner-side `/projects/&lt;project_name&gt;/&lt;path&gt;` named-volume
+    mount and returns it to the orchestrator as a UTF-8 string. The
+    tool is registered on both the orchestrator's tool list and every
+    subagent's tool list, parallel to `file_read`. Every refusal path
+    (invalid `project_name`, path escape, missing project, directory /
+    special file, binary, oversize) returns a short `error: ...`
+    string the agent observes as the tool result and re-plans
+    against — the surface is stable and exposed to the LLM.</intent>
+    <structure>
+      - `read_project_file(project_name, path, start_line=None,
+        end_line=None) -> str` — the `@tool`-decorated callable. The
+        `_impl` helper carries the logic so the function stays
+        directly callable in tests / smoke scripts even when the
+        Strands decorator is unavailable.
+      - `_PROJECT_NAME_RE` — `^[a-z][a-z0-9-]{0,63}$`, shared shape
+        with `runner/agents_loader.py:_NAME_RE`. Failing the regex
+        short-circuits with NO filesystem access.
+      - `_resolve_under_project(project_name, path)` — applies
+        `Path.resolve(strict=True)` to both the project root and the
+        full target path; verifies containment via
+        `str(target).startswith(str(project_root) + os.sep)`.
+      - Binary heuristic: read first 8 KiB and `.decode("utf-8")`; on
+        `UnicodeDecodeError` return the binary-file error string.
+      - Size cap from `settings.tool_limits.read_project_file.max_bytes`
+        (default 256 KiB); applied only when no line range is requested
+        because a line-slice read is bounded by the slice itself.
+    </structure>
+    <requires ref="cmp.runner.entrypoint"/>
+    <constraints>
+      <constraint ref="con.project-file-path-containment"/>
     </constraints>
   </component>
 
@@ -994,6 +1033,19 @@
     <forbid construct="prior-messages-merged-on-every-turn"/>
   </constraint>
 
+  <constraint id="con.skills-bodies-inlined" type="pattern">
+    <intent>The runner inlines every discovered SKILL.md body verbatim
+    into the orchestrator's `system_prompt` at agent-build time. The
+    Strands-native `AgentSkills` plugin (which exposes a `skills` tool
+    for on-demand activation) is intentionally NOT mounted. Migration
+    criteria are listed in `docs/specs/agent-skills.md` → "When to
+    switch to the plugin pattern".</intent>
+    <require>`_load_skills_prompt` calls `agentskills.discover_skills` for YAML-frontmatter validation, then reads each SKILL.md off disk, strips the leading frontmatter block, and wraps the body in `&lt;skill&gt;&lt;name/&gt;&lt;description/&gt;&lt;body/&gt;&lt;/skill&gt;` under a framing `&lt;available_skills&gt;` header.</require>
+    <require>The framing header tells the model the bodies are already loaded so the orchestrator does not waste a turn issuing `file_read` against a SKILL.md path.</require>
+    <forbid construct="agentskills-plugin-registered-on-agent"/>
+    <forbid construct="skills-prompt-built-from-generate-skills-prompt"/>
+  </constraint>
+
   <constraint id="con.channel-replay-on-transient" type="pattern">
     <intent>On a transient outbound failure (httpx.TransportError or
     response status 408 or 5xx) the channel prepends every frame
@@ -1058,6 +1110,25 @@
     <require>`build_subagents` consults a `reserved_names: set[str]` of MCP tool names and skips any spec whose `name` is in the set.</require>
     <require>On a duplicate `name` across two AGENT.md files the first by sort order wins; the second is skipped with a `agents.duplicate_name` warning.</require>
     <forbid construct="subagent-load-error-fatal-to-runner-startup"/>
+  </constraint>
+
+  <constraint id="con.project-file-path-containment" type="rule">
+    <intent>`read_project_file` MUST resolve
+    `{projects_dir}/{project_name}/{path}` with
+    `Path.resolve(strict=True)` and reject any result whose absolute
+    path does not start with the resolved
+    `{projects_dir}/{project_name}/` prefix (string-prefix on
+    resolved paths, NOT parent walks). Symlinks to siblings under
+    `/projects/&lt;other&gt;/` MUST be rejected as path escapes; symlinks
+    to targets outside the projects volume (`/etc/passwd`,
+    `/proc/...`, …) MUST be rejected likewise. The `strict=True`
+    flag is required: it makes a symlink to a non-existent target
+    raise `FileNotFoundError` instead of silently producing a
+    nonexistent absolute path.</intent>
+    <require>Both the project root and the full target path are resolved with `Path.resolve(strict=True)`.</require>
+    <require>Containment is verified with `str(target).startswith(str(project_root) + os.sep)`, not a parent-walk.</require>
+    <forbid construct="parent-walk-containment-check"/>
+    <forbid construct="path-resolve-without-strict-true"/>
   </constraint>
 
   <constraint id="con.hook-deadline-bounded" type="rule">

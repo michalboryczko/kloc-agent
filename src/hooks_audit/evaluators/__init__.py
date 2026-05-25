@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .file_read import FileReadEvaluator
 from .kloc_flows import KlocFlowsEvaluator
+from .read_project_file import ReadProjectFileEvaluator
 
 if TYPE_CHECKING:
     from src.hooks_audit.policy import PolicyDecision
@@ -28,6 +29,7 @@ class ToolPolicyEvaluator(Protocol):
 EVALUATORS: dict[str, ToolPolicyEvaluator] = {
     "file_read": FileReadEvaluator(),
     "kloc_flows": KlocFlowsEvaluator(),
+    "read_project_file": ReadProjectFileEvaluator(),
 }
 
 
@@ -35,5 +37,6 @@ __all__ = [
     "EVALUATORS",
     "FileReadEvaluator",
     "KlocFlowsEvaluator",
+    "ReadProjectFileEvaluator",
     "ToolPolicyEvaluator",
 ]

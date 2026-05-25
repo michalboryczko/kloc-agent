@@ -5,7 +5,11 @@ Composition:
   * tools = MCP tools (kloc-intelligence) + subagents discovered from
     `agents/<name>/AGENT.md` via `runner/agents_loader.py` +
     `file_read` for skill-body progressive disclosure.
-  * skills_prompt = `discover_skills` + `generate_skills_prompt`.
+  * skills_prompt = strands_agentskills discovery (for YAML-frontmatter
+    validation + silent drop-with-warning of broken files) plus a manual
+    inliner that embeds each SKILL.md body verbatim into the system
+    prompt. The Strands-native `AgentSkills` plugin is intentionally NOT
+    mounted — see `docs/specs/agent-skills.md`.
   * No `session_manager` passed — Postgres is the source of truth.
     History reconciliation happens via `RunAgentInput.messages` on
     every `agent.run(input)` call.
@@ -108,22 +112,62 @@ def _observe_subagents_loaded_gauge(count: int) -> None:
         log.debug("agents.subagents_loaded_gauge_not_wired")
 
 
+def _strip_frontmatter(raw: str) -> str:
+    if not raw.startswith("---"):
+        return raw
+    parts = raw.split("---", 2)
+    if len(parts) < 3:
+        return raw
+    return parts[2].lstrip("\n")
+
+
+# The upstream strands_agentskills prompt builder emits a metadata-only
+# `<available_skills>` block whose bodies are gated behind a `skills` tool
+# the runner does not register. Inlining every SKILL.md body verbatim into
+# the system prompt avoids both the missing-tool round-trip and the
+# first-turn latency of fetching procedure content before the orchestrator
+# can pick a strategy. We keep the upstream discoverer so YAML-frontmatter
+# validation (and silent drop-with-warning of broken files) stays in one
+# place.
 def _load_skills_prompt(skills_dir: Path) -> str:
     try:
-        from agentskills import discover_skills, generate_skills_prompt  # type: ignore
+        import agentskills  # type: ignore
     except ImportError:
         log.warning(
             "skills.agentskills_not_installed; skipping skills prompt"
         )
         return ""
     try:
-        skills = discover_skills(skills_dir)
+        skills = agentskills.discover_skills(skills_dir)
     except Exception:
         log.exception("skills.discover_failed", extra={"dir": str(skills_dir)})
         return ""
     if not skills:
         return ""
-    return generate_skills_prompt(skills)
+
+    header = (
+        "<available_skills>\n"
+        "The following skills are inlined in full. Treat each one as if you had\n"
+        "already read it — do NOT issue a file_read just to load a SKILL.md\n"
+        "whose body is already shown below. Apply the skill when its description\n"
+        "matches the user's question.\n"
+    )
+    blocks: list[str] = []
+    for skill in skills:
+        try:
+            raw = Path(skill.path).read_text(encoding="utf-8")
+        except OSError:
+            log.warning("skills.body_read_failed", extra={"path": skill.path})
+            continue
+        body = _strip_frontmatter(raw)
+        blocks.append(
+            f"<skill>\n  <name>{skill.name}</name>\n"
+            f"  <description>{skill.description}</description>\n"
+            f"  <body>\n{body}\n  </body>\n</skill>"
+        )
+    if not blocks:
+        return ""
+    return header + "\n" + "\n\n".join(blocks) + "\n</available_skills>"
 
 
 def build_agent(
@@ -157,6 +201,15 @@ def build_agent(
             "disclosure may be limited"
         )
 
+    try:
+        from .tools.project_files import read_project_file  # type: ignore
+    except ImportError:
+        read_project_file = None
+        log.warning(
+            "runner.tools.project_files.read_project_file not available; "
+            "project-source file reads will be unavailable"
+        )
+
     def _field(name: str, default: Any = None) -> Any:
         # Pydantic models have no `.get()`; only attribute access works.
         # Plain dicts use `.get()`. Read both safely without conflating.
@@ -185,6 +238,8 @@ def build_agent(
     subagent_tools: list[Any] = [*mcp_tools]
     if file_read is not None:
         subagent_tools.append(file_read)
+    if read_project_file is not None:
+        subagent_tools.append(read_project_file)
     subagents = build_subagents(
         discover_agents(agents_dir),
         model=model,
@@ -197,6 +252,8 @@ def build_agent(
     tools: list[Any] = [*mcp_tools, *subagents]
     if file_read is not None:
         tools.append(file_read)
+    if read_project_file is not None:
+        tools.append(read_project_file)
 
     agent = Agent(
         model=model,

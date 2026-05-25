@@ -26,6 +26,7 @@ except ImportError:
 from .hydrate import (
     build_agents_mount,
     build_hydration_mount,
+    build_projects_mount,
     build_skills_mount,
     cleanup_hydration_tempfile,
     runner_mount_path_for,
@@ -145,6 +146,7 @@ class DockerRunner(Runner):
                     build_hydration_mount(),
                     build_skills_mount(self._skills_host_dir),
                     build_agents_mount(),
+                    build_projects_mount(),
                 ],
                 # Resolve `host.docker.internal` to the host gateway so
                 # the runner can reach the operator-managed
